@@ -307,6 +307,30 @@ async function openPlayer(video, optSite) {
     document.getElementById('playerActions').insertAdjacentElement('afterend', cmdRow);
   }
 
+  // Recommended videos theo tag đầu tiên
+  const recContainer = document.getElementById('playerRec');
+  if (recContainer) recContainer.remove();
+  const tags = detail.tags || [];
+  const firstTag = tags[0]?.slug || tags[0]?.name || '';
+  if (firstTag && site !== 'fav' && site !== 'sexbjcam') {
+    apiFetch(`/api/videos?site=${site}&search=${encodeURIComponent(firstTag)}&page=1`).then(data => {
+      if (!data.success || !data.videos?.length) return;
+      // Lọc bỏ video hiện tại
+      const related = data.videos.filter(v => v.path !== video.path).slice(0, 12);
+      if (!related.length) return;
+      let html = `<div class="player-rec" id="playerRec" style="padding:12px 20px;border-top:1px solid #2a2a2a">`;
+      html += `<div style="font-size:14px;color:#999;margin-bottom:8px">🎬 Liên quan: ${escHtml(tags[0]?.name || firstTag)}</div>`;
+      html += `<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px">`;
+      for (const r of related) {
+        const idx = allVideos.length;
+        allVideos.push(r);
+        html += `<div class="card" data-idx="${idx}" style="flex:0 0 auto;width:160px"><img class="card-img" src="${r.thumbnail}" alt="" style="height:220px" loading="lazy" onerror="this.style.background='#222'"><div class="card-body"><div class="card-title">${escHtml(r.title || '')}</div></div></div>`;
+      }
+      html += `</div></div>`;
+      document.getElementById('playerDesc').insertAdjacentHTML('afterend', html);
+    }).catch(() => {});
+  }
+
   // Playlist parts
   const playlist = detail.playlist || [];
   const existingPl = document.querySelector('.player-playlist');

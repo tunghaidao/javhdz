@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NetFlix · Xem phim</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎬</text></svg>">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- ========== NAVBAR ========== -->
+  <nav class="navbar" id="navbar">
+    <div class="nav-inner">
+      <div class="nav-left">
+        <a href="/" class="logo" onclick="return navigateHome(event)">Net<span>Flix</span></a>
+        <div class="nav-links" id="navLinks">
+          <a href="#" class="active" data-site="javhdz" onclick="return switchSite(event,'javhdz')">JavHDz</a>
+          <a href="#" data-site="vlxx" onclick="return switchSite(event,'vlxx')">VLXX</a>
+          <a href="#" data-site="quatvn" onclick="return switchSite(event,'quatvn')">QuạtVN</a>
+          <a href="#" data-site="sexbjcam" onclick="return switchSite(event,'sexbjcam')">SexBJCam</a>
+        </div>
+      </div>
+      <div class="nav-right">
+        <div class="search-box">
+          <input type="text" id="searchInput" placeholder="Tìm kiếm..." onkeydown="if(event.key==='Enter')doSearch()">
+          <button onclick="doSearch()">🔍</button>
+        </div>
+        <button class="menu-toggle" onclick="toggleMobileMenu()">☰</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ========== HERO ========== -->
+  <section class="hero" id="hero">
+    <div class="hero-bg" id="heroBg"></div>
+    <div class="hero-gradient"></div>
+    <div class="hero-content">
+      <h1 class="hero-title" id="heroTitle">Chào mừng đến với NetFlix</h1>
+      <p class="hero-desc" id="heroDesc">Hàng ngàn bộ phim miễn phí, không quảng cáo. Xem ngay!</p>
+      <div class="hero-buttons">
+        <button class="btn-primary" id="heroPlayBtn" onclick="heroPlay()">▶ Phát ngay</button>
+        <button class="btn-secondary">ℹ Thông tin</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== CATEGORY TABS ========== -->
+  <section class="cat-bar" id="catBar">
+    <div class="cat-scroll" id="catScroll"></div>
+  </section>
+
+  <!-- ========== CONTENT ROWS ========== -->
+  <main class="content" id="content">
+    <div class="loading-screen" id="loadingScreen">
+      <div class="spinner"></div>
+      <p>Đang tải...</p>
+    </div>
+  </main>
+
+  <!-- ========== VIDEO PLAYER MODAL ========== -->
+  <div class="player-overlay" id="playerOverlay" onclick="closePlayer(event)">
+    <div class="player-container" onclick="event.stopPropagation()">
+      <div class="player-header">
+        <h2 class="player-title" id="playerTitle"></h2>
+        <button class="player-close" onclick="closePlayer()">✕</button>
+      </div>
+      <div class="player-wrap" id="playerWrap">
+        <video id="videoPlayer" controls autoplay playsinline></video>
+      </div>
+      <div class="player-meta" id="playerMeta">
+        <div class="player-tags" id="playerTags"></div>
+        <div class="player-actions" id="playerActions"></div>
+      </div>
+      <div class="player-desc" id="playerDesc"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

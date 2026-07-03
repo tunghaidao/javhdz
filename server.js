@@ -1,0 +1,1066 @@
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const { URL } = require('url');
+const crypto = require('crypto');
+const dns = require('dns');
+
+// ============================================================
+// DNS bypass
+// ============================================================
+try {
+  dns.setServers(['1.1.1.1', '1.0.0.1', '8.8.8.8', '8.8.4.4']);
+  console.log('[DNS] → Cloudflare + Google');
+} catch (e) {
+  console.warn('[DNS] Failed:', e.message);
+}
+
+const PORT = process.env.PORT || 3000;
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// ============================================================
+// KeepAlive Agent — QUAN TRỌNG: vượt Cloudflare CDN
+// ============================================================
+const AGENTS = {
+  http: new http.Agent({ keepAlive: true, maxSockets: 64 }),
+  https: new https.Agent({ keepAlive: true, maxSockets: 64, rejectUnauthorized: false }),
+};
+
+// ============================================================
+// DISK CACHE
+// ============================================================
+const CACHE_DIR = path.join(__dirname, '.video_cache');
+const MAX_DISK_CACHE = 5 * 1024 * 1024 * 1024;
+const SEGMENT_TTL = 3 * 60 * 60 * 1000;
+const PLAYLIST_TTL = 5 * 60 * 1000;
+const PREFETCH_CONCURRENCY = 6;
+
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+const playlistCache = new Map();
+const fetchPromises = new Map();
+const detailCache = new Map(); // 5 min cache cho video-detail
+
+function cachePath(url) {
+  return path.join(CACHE_DIR, crypto.createHash('md5').update(url).digest('hex') + '.ts');
+}
+
+function cacheGet(url) {
+  const fp = cachePath(url);
+  if (fs.existsSync(fp)) {
+    try { fs.utimesSync(fp, new Date(), new Date()); return fs.readFileSync(fp); } catch { return null; }
+  }
+  return null;
+}
+
+function cleanLRU(needed) {
+  try {
+    const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.ts')).map(f => {
+      const fp = path.join(CACHE_DIR, f);
+      const s = fs.statSync(fp);
+      return { path: fp, size: s.size, atime: s.atimeMs };
+    });
+    let total = files.reduce((a, f) => a + f.size, 0);
+    if (total + needed <= MAX_DISK_CACHE) return;
+    files.sort((a, b) => a.atime - b.atime);
+    let del = 0;
+    for (const f of files) {
+      if (total + needed <= MAX_DISK_CACHE) break;
+      try { fs.unlinkSync(f.path); total -= f.size; del++; } catch {}
+    }
+    if (del) console.log(`[CACHE] LRU evicted ${del} files (${(total/1e9).toFixed(2)}GB)`);
+  } catch {}
+}
+
+function cacheSet(url, buf) {
+  const fp = cachePath(url);
+  if (fs.existsSync(fp)) return;
+  cleanLRU(buf.length);
+  try { fs.writeFileSync(fp, buf); } catch {}
+}
+
+// ============================================================
+// FETCH với KeepAlive Agent — vượt Cloudflare
+// ============================================================
+function fetchText(url, referer, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const doFetch = (u, redirects = 0) => {
+      if (redirects > 5) return reject(new Error('Too many redirects'));
+      const isHttps = u.startsWith('https:');
+      const mod = isHttps ? https : http;
+      const opts = {
+        headers: {
+          'User-Agent': UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+          ...(referer ? { 'Referer': referer, 'Origin': new URL(referer).origin } : {}),
+          ...extraHeaders
+        },
+        agent: isHttps ? AGENTS.https : AGENTS.http,
+        timeout: 20000,
+        rejectUnauthorized: false
+      };
+      const req = mod.get(u, opts, resp => {
+        // Follow redirect
+        if (resp.statusCode > 299 && resp.statusCode < 400 && resp.headers.location) {
+          resp.resume();
+          const loc = resp.headers.location.startsWith('http')
+            ? resp.headers.location
+            : new URL(resp.headers.location, u).href;
+          return doFetch(loc, redirects + 1);
+        }
+        if (resp.statusCode < 200 || resp.statusCode > 299) {
+          resp.resume();
+          // Fallback: dùng curl cho 403 (Cloudflare TLS fingerprint)
+          if (resp.statusCode === 403) {
+            console.log(`[CURL FALLBACK] ${u.slice(0, 60)}`);
+            try {
+              const { execSync } = require('child_process');
+              const escapedUrl = u.replace(/'/g, "'\\''");
+              const out = execSync(`curl -sL -A '${UA.replace(/'/g, "'\\''")}' --max-time 15 '${escapedUrl}'`, {
+                encoding: 'utf8', timeout: 20000
+              });
+              if (out && out.length > 100) return resolve(out);
+            } catch {}
+          }
+          return reject(new Error(`HTTP ${resp.statusCode}`));
+        }
+        const chunks = [];
+        resp.on('data', c => chunks.push(c));
+        resp.on('end', () => resolve(Buffer.concat(chunks).toString()));
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    };
+    doFetch(url);
+  });
+}
+function fetchBuffer(url, referer) {
+  return new Promise((resolve, reject) => {
+    const isHttps = url.startsWith('https:');
+    const mod = isHttps ? https : http;
+    const opts = {
+      headers: {
+        'User-Agent': UA,
+        'Accept': '*/*',
+        ...(referer ? { 'Referer': referer, 'Origin': new URL(referer).origin } : {}),
+      },
+      agent: isHttps ? AGENTS.https : AGENTS.http,
+      timeout: 20000,
+      rejectUnauthorized: false
+    };
+    const req = mod.get(url, opts, resp => {
+      if (resp.statusCode > 299 && resp.statusCode < 400 && resp.headers.location) {
+        resp.resume();
+        const loc = resp.headers.location.startsWith('http')
+          ? resp.headers.location
+          : new URL(resp.headers.location, url).href;
+        return fetchBuffer(loc, referer).then(resolve).catch(reject);
+      }
+      if (resp.statusCode < 200 || resp.statusCode > 299) {
+        resp.resume();
+        return reject(new Error(`HTTP ${resp.statusCode}`));
+      }
+      const chunks = [];
+      resp.on('data', c => chunks.push(c));
+      resp.on('end', () => {
+        let buf = Buffer.concat(chunks);
+        // Strip PNG disguise
+        if (buf.length > 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+          for (let i = 0; i < Math.min(buf.length - 376, 2000); i++) {
+            if (buf[i] === 0x47 && buf[i+188] === 0x47 && buf[i+376] === 0x47) {
+              buf = buf.subarray(i); break;
+            }
+          }
+        }
+        resolve(buf);
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+async function fetchAndCacheSegment(url, host) {
+  const cached = cacheGet(url);
+  if (cached) return cached;
+  if (fetchPromises.has(url)) return fetchPromises.get(url);
+
+  const p = (async () => {
+    try {
+      const buf = await fetchBuffer(url, host + '/');
+      cacheSet(url, buf);
+      return buf;
+    } catch { return null; }
+    finally { fetchPromises.delete(url); }
+  })();
+  fetchPromises.set(url, p);
+  return p;
+}
+
+async function getPlaylistSegments(plUrl, host) {
+  const cached = playlistCache.get(plUrl);
+  if (cached && Date.now() - cached.ts < PLAYLIST_TTL) return cached.urls;
+  try {
+    const text = await fetchText(plUrl, host + '/');
+    const base = plUrl.substring(0, plUrl.lastIndexOf('/') + 1);
+    const urls = [];
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      urls.push(t.startsWith('http') ? t : (t.startsWith('/') ? new URL(plUrl).origin + t : base + t));
+    }
+    playlistCache.set(plUrl, { urls, rawText: text, ts: Date.now() });
+    return urls;
+  } catch { return []; }
+}
+
+let activePlUrl = '';
+
+function prefetchToEnd(allUrls, idx, host, plUrl) {
+  activePlUrl = plUrl;
+  const todo = [];
+  for (let i = idx; i < allUrls.length; i++) {
+    const u = allUrls[i];
+    if (!fs.existsSync(cachePath(u)) && !fetchPromises.has(u)) todo.push(u);
+  }
+  if (!todo.length) return;
+  (async () => {
+    for (let i = 0; i < todo.length; i += PREFETCH_CONCURRENCY) {
+      if (activePlUrl !== plUrl) break;
+      await Promise.all(todo.slice(i, i + PREFETCH_CONCURRENCY).map(u => fetchAndCacheSegment(u, host).catch(() => {})));
+    }
+  })();
+}
+
+// ============================================================
+// SITES CONFIG
+// ============================================================
+const SITES = {
+  javhdz: { base: 'https://javhdz.ws' },
+  vlxx: { base: 'https://vlxx.moi' },
+  quatvn: { base: 'https://quatvn.moi' },
+  sexbjcam: { base: 'https://sexbjcam.com' },
+};
+
+function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
+
+// ============================================================
+// HELPERS
+// ============================================================
+function sendJSON(res, data, status = 200) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': '*'
+  });
+  res.end(JSON.stringify(data));
+}
+
+function serveStatic(res, fp) {
+  const mime = {
+    '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
+    '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon', '.webp': 'image/webp'
+  };
+  const ct = mime[path.extname(fp).toLowerCase()] || 'application/octet-stream';
+  fs.readFile(fp, (err, data) => {
+    if (err) {
+      res.writeHead(err.code === 'ENOENT' ? 404 : 500, { 'Content-Type': 'text/plain' });
+      res.end(err.code === 'ENOENT' ? 'Not found' : 'Server error');
+    } else {
+      res.writeHead(200, { 'Content-Type': ct, 'Access-Control-Allow-Origin': '*' });
+      res.end(data);
+    }
+  });
+}
+
+function deobfuscatePacked(html) {
+  try {
+    const s = html.indexOf("eval(function(p,a,c,k,e,d){");
+    if (s === -1) return null;
+    const code = html.substring(s);
+    const end = code.indexOf("}(");
+    if (end === -1) return null;
+    const call = code.substring(end + 2);
+    let i = 1, p = '';
+    while (i < call.length) {
+      if (call[i] === "'" && call[i+1] === ",") { i += 2; break; }
+      if (call[i] === "\\" && call[i+1] === "'") { p += "'"; i += 2; continue; }
+      p += call[i]; i++;
+    }
+    const m = call.substring(i).match(/^(\d+),(\d+),'([^']+)'\.split/);
+    if (!m) return null;
+    const a = parseInt(m[1]), c = parseInt(m[2]);
+    const k = m[3].split('|');
+    let r = p;
+    for (let j = 0; j < c; j++) {
+      if (k[j]) r = r.replace(new RegExp("\\b" + j.toString(a) + "\\b", "g"), k[j]);
+    }
+    return r;
+  } catch { return null; }
+}
+
+// ============================================================
+// HTTP SERVER
+// ============================================================
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Max-Age': '86400' });
+    return res.end();
+  }
+
+  const parsed = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = parsed.pathname;
+  let site = parsed.searchParams.get('site') || parsed.searchParams.get('s') || 'javhdz';
+  if (!SITES[site]) site = 'javhdz';
+  const HOST = getHost(site);
+
+  try {
+    // ==================== API: DANH SÁCH VIDEO ====================
+    if (pathname === '/api/videos') {
+      const page = parsed.searchParams.get('page') || 1;
+      const category = parsed.searchParams.get('category') || '';
+      const search = parsed.searchParams.get('search') || '';
+      let url = HOST;
+
+      if (site === 'vlxx') {
+        if (search) {
+          url = `${HOST}/search/${search.replace(/\s+/g, '-')}/`;
+          if (page > 1) url += `${page}/`;
+        } else if (category) {
+          url = `${HOST}/${category}/`;
+          if (page > 1) url += `${page}/`;
+        } else {
+          url = page > 1 ? `${HOST}/new/${page}/` : `${HOST}/`;
+        }
+      } else if (site === 'quatvn') {
+        if (search) {
+          url = `${HOST}/?s=${encodeURIComponent(search)}`;
+          if (page > 1) url = `${HOST}/page/${page}/?s=${encodeURIComponent(search)}`;
+        } else if (category) {
+          url = `${HOST}/${category}/`;
+          if (page > 1) url += `page/${page}/`;
+        } else {
+          url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
+        }
+      } else if (site === 'sexbjcam') {
+        if (search) {
+          url = `${HOST}/?s=${encodeURIComponent(search)}`;
+          if (page > 1) url = `${HOST}/page/${page}/?s=${encodeURIComponent(search)}`;
+        } else if (category) {
+          url = `${HOST}/category/${category}/`;
+          if (page > 1) url += `page/${page}/`;
+        } else {
+          url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
+        }
+      } else {
+        if (search) {
+          url = `${HOST}/search/${encodeURIComponent(search)}/`;
+          if (page > 1) url += `page/${page}/`;
+        } else if (category) {
+          url = category === 'trending'
+            ? (page > 1 ? `${HOST}/trending/page/${page}/` : `${HOST}/trending/`)
+            : `${HOST}/category/${category}/` + (page > 1 ? `page/${page}/` : '');
+        } else {
+          url = page > 1 ? `${HOST}/video/page/${page}/` : `${HOST}/video/`;
+        }
+      }
+
+      console.log(`[SCRAPE] ${url}`);
+      const html = await fetchText(url, HOST + '/');
+      const videos = [];
+      let categories = [];
+
+      if (site === 'vlxx') {
+        const re = /<div[^>]*class="video-item">[\s\S]*?<a title="([^"]+)" href="([^"]+)"[\s\S]*?data-original="([^"]+)"[\s\S]*?(?:<div class="ribbon">([^<]+)<\/div>)?/g;
+        let m; while ((m = re.exec(html))) videos.push({ title: m[1], path: m[2], thumbnail: m[3], views: m[4] || 'N/A' });
+        categories = [
+          { slug: 'jav', name: 'JAV' }, { slug: 'phim-sex-hay', name: 'Phim sex hay' },
+          { slug: 'vietsub', name: 'Vietsub' }, { slug: 'khong-che', name: 'Không che' },
+          { slug: 'hoc-sinh', name: 'Học sinh' }, { slug: 'vung-trom', name: 'Vụng trộm' },
+          { slug: 'cap-3', name: 'Cấp 3' }, { slug: 'chau-au', name: 'Mỹ - Châu Âu' },
+          { slug: 'xvideos', name: 'XVIDEOS' }, { slug: 'xnxx', name: 'XNXX' }
+        ];
+      } else if (site === 'quatvn') {
+        const re = /<article[\s\S]*?<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?(?:<span class="entry-views[^"]*">\s*<strong>([^<]+)<\/strong>)?/g;
+        let m; while ((m = re.exec(html))) {
+          let p = ''; try { p = m[1].startsWith('http') ? new URL(m[1]).pathname : m[1]; } catch { p = m[1]; }
+          videos.push({ title: m[2].replace(/<[^>]+>/g, '').trim(), path: p, thumbnail: m[3], views: m[4] || 'N/A' });
+        }
+        categories = [
+          { slug: 'phim-sex-vn', name: 'Việt Nam' }, { slug: 'phim-sex-trung-quoc', name: 'Trung Quốc' },
+          { slug: 'phim-sex-han-quoc', name: 'Hàn Quốc' }, { slug: 'phim-sex-us', name: 'US-UK' },
+          { slug: 'phim-sex-thai-lan', name: 'Thái Lan' }, { slug: 'phim-sex-nhat-ban', name: 'Nhật Bản' }
+        ];
+      } else if (site === 'sexbjcam') {
+        const blocked = ['jinricp', 'mscrew33'];
+        const parse = (h) => {
+          const out = [];
+          const arts = h.match(/<article[\s\S]*?<\/article>/g) || [];
+          for (const a of arts) {
+            // Thumbnail từ data-main-thumb
+            const thumb = a.match(/data-main-thumb="([^"]+)"/)?.[1]
+                      || a.match(/src="([^"]+\.(?:jpg|jpeg|png|webp))"/i)?.[1]
+                      || '';
+            // Link từ <a href=...> đầu tiên
+            const hrefM = a.match(/<a\s+href="([^"]+)"[^>]*>/i);
+            if (!hrefM) continue;
+            let p = '';
+            try { p = hrefM[1].startsWith('http') ? new URL(hrefM[1]).pathname : hrefM[1]; } catch { p = hrefM[1]; }
+            // Title từ entry-title hoặc thẻ <h2>/<h3>
+            const titleM = a.match(/class="[^"]*entry-title[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
+                        || a.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i)
+                        || a.match(/alt="([^"]+)"/i);
+            let t = titleM ? titleM[1].replace(/<[^>]+>/g, '').trim() : '';
+            if (!t || blocked.some(k => t.toLowerCase().includes(k))) continue;
+            out.push({
+              title: t,
+              path: p,
+              thumbnail: thumb.includes('sexbjcam.com') ? '/api/proxy/image?url=' + encodeURIComponent(thumb) + '&site=sexbjcam' : thumb,
+              views: 'N/A'
+            });
+          }
+          return out;
+        };
+        videos.push(...parse(html));
+        if (videos.length > 500) videos.length = 500;
+        categories = [{ slug: 'kbj', name: 'KBJ' }, { slug: 'bj', name: 'BJ' }, { slug: 'webcam', name: 'Webcam' }];
+      } else {
+        const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
+        let m; while ((m = re.exec(html))) {
+          videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: m[4] });
+        }
+        if (!videos.length) {
+          const re2 = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"/g;
+          while ((m = re2.exec(html))) videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: 'N/A' });
+        }
+        const cr = /<li class="menu-item"><a href="\/category\/([^"]+)\/">([^<]+)<\/a><\/li>/g;
+        while ((m = cr.exec(html))) categories.push({ slug: m[1], name: m[2] });
+        if (!categories.length) categories = [
+          { slug: 'trending', name: 'Trending' }, { slug: 'censored-2', name: 'Censored' },
+          { slug: 'uncensored-3', name: 'Không che' }, { slug: 'beauty-4', name: 'Beauty' }
+        ];
+      }
+
+      // Parse tổng số trang từ navigation
+      let totalPages = 1;
+      const pageNums = [];
+
+      if (site === 'sexbjcam') {
+        // SexBJCam: phân trang bình thường, fetch theo page yêu cầu
+        totalPages = 99; // ước lượng — tự dừng khi hết nội dung
+      } else if (site === 'vlxx') {
+        // VLXX dùng data-page attribute và /new/N/ URL
+        const pageRe = /data-page='(\d+)'/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
+      } else if (site === 'quatvn') {
+        // QuatVN dùng g1-pagination, chỉ hiện 4 trang + "Next"
+        const pageRe = /\/page\/(\d+)\/"[^>]*>(\d+)<\/a>/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[2]));
+        // Kiểm tra có "Next" link không
+        const hasNext = /rel="next"|class="[^"]*next[^"]*"|aria-label="Next"/i.test(html);
+        const maxVisible = pageNums.length ? Math.max(...pageNums) : 0;
+        // Nếu có Next nhưng chỉ thấy ≤4 trang → set mặc định 99 (vô hạn)
+        if (hasNext && maxVisible <= 4) totalPages = 999;
+        else totalPages = maxVisible || 1;
+      } else {
+        // javhdz, sexbjcam: /page/N/ trong href
+        const pageRe = /\/page\/(\d+)\/"[^>]*>(\d+)<\/a>/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[2]));
+        const filtered = pageNums.filter(n => n > 2);
+        if (filtered.length) totalPages = Math.max(...filtered);
+        else if (pageNums.length) totalPages = Math.max(...pageNums);
+      }
+
+      return sendJSON(res, { success: true, page: parseInt(page), hasMore: parseInt(page) < totalPages, totalPages, videos, categories });
+
+    // ==================== API: CHI TIẾT VIDEO ====================
+    } else if (pathname === '/api/video-detail') {
+      const videoPath = parsed.searchParams.get('path');
+      if (!videoPath) return sendJSON(res, { success: false, error: 'Missing path' }, 400);
+
+      // Detail cache (5 phút)
+      const cacheKey = site + ':' + videoPath;
+      const cached = detailCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < 300000) return sendJSON(res, cached.data);
+
+      const cleanPath = videoPath.startsWith('/') ? videoPath : '/' + videoPath;
+      const url = HOST + cleanPath;
+      console.log(`[DETAIL] ${url}`);
+      const html = await fetchText(url, HOST + '/');
+
+      const title = (html.match(/<h1 class="page-title[^"]*"[^>]*>([\s\S]*?)<\/h1>/) ||
+                     html.match(/<h1 class="header-title"><a[^>]*>([^<]+)<\/a><\/h1>/) ||
+                     html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/))?.[1].replace(/<[^>]+>/g, '').trim() || 'Unknown';
+
+      let videoId = (html.match(/id="video"\s+data-id="(\d+)"/) || html.match(/server\((\d+)/))?.[1] || null;
+      if (site === 'quatvn' && !videoId) {
+        const dm = html.match(/data-item="([^"]+)"/);
+        if (dm) try { const di = JSON.parse(dm[1].replace(/&quot;/g, '"')); if (di.id) videoId = di.id.toString(); } catch {}
+      }
+
+      let description = '';
+      if (site === 'vlxx') { const d = html.match(/<div class="video-description">([\s\S]*?)<\/div>/); description = d ? d[1] : ''; }
+      else if (site === 'quatvn') { const d = html.match(/<div class="entry-content[^"]*">([\s\S]*?)<\/div>/); description = d ? d[1] : ''; }
+      else { const d = html.match(/<article class="block-movie-content"[^>]*>([\s\S]*?)<\/article>/); description = d ? d[1] : ''; }
+      description = description.replace(/<(?!\/?img(?=>|\s)[^>]*>)[^>]+>/g, '').trim();
+
+      let thumbnail = html.match(/<meta property="og:image" content="([^"]+)"/)?.[1] || '';
+      if (!thumbnail && site !== 'vlxx' && site !== 'quatvn') thumbnail = html.match(/class="thumb" src="([^"]+)"/)?.[1] || '';
+      if (site === 'quatvn' && !thumbnail) {
+        const dm = html.match(/data-item="([^"]+)"/);
+        if (dm) try { const di = JSON.parse(dm[1].replace(/&quot;/g, '"')); if (di.splash) thumbnail = di.splash; } catch {}
+      }
+      if (thumbnail && !thumbnail.startsWith('http')) thumbnail = HOST + '/' + thumbnail.replace(/^\//, '');
+
+      const tags = [];
+      if (site === 'vlxx') {
+        const tb = html.match(/<div class="video-tags">([\s\S]*?)<\/div>/);
+        if (tb) { const tr = /<a href="([^"]+)" title="([^"]+)">/g; let m; while ((m = tr.exec(tb[1]))) tags.push({ slug: m[1].replace(/^\//, '').replace(/\/$/, ''), name: m[2] }); }
+      } else if (site === 'quatvn') {
+        const tr = /<a href="[^"]*\/tag\/([^"\/]+)\/"[\s\S]*?>([^<]+)<\/a>/g; let m;
+        while ((m = tr.exec(html))) tags.push({ slug: m[1], name: m[2].trim() });
+      } else {
+        const tr = /<a class="tag-link" href="\/tag\/([^"]+)\/" title="([^"]+)">/g; let m;
+        while ((m = tr.exec(html))) tags.push({ slug: m[1], name: m[2] });
+      }
+
+      let streamUrl = null, proxiedStreamUrl = null, quatvnPlaylist = null;
+
+      // --- VLXX ---
+      if (site === 'vlxx' && videoId) {
+        // POST tới VLXX ajax để lấy stream URL
+        try {
+          const postData = 'vlxx_server=1&id=' + videoId + '&server=1';
+          const resp = await new Promise((resolve) => {
+            const req = https.request('https://vlxx.moi/ajax.php', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postData),
+                'Referer': url,
+                'Origin': 'https://vlxx.moi',
+                'User-Agent': UA
+              },
+              agent: AGENTS.https
+            }, r => {
+              const chunks = [];
+              r.on('data', c => chunks.push(c));
+              r.on('end', () => {
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+                catch { resolve(null); }
+              });
+            });
+            req.on('error', () => resolve(null));
+            req.write(postData);
+            req.end();
+          });
+          if (resp && resp.player) {
+            const src = resp.player.match(/iframe[^>]*src="([^"]+)"/) || resp.player.match(/src='([^']+)'/);
+            if (src) {
+              const embed = await fetchText(src[1], 'https://vlxx.moi/');
+              const fm = embed.match(/"file"\s*:\s*"([^"]+)"/);
+              if (fm) {
+                streamUrl = fm[1];
+                // Google CDN không có CORS → phải proxy qua server
+                proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=${site}`;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // --- QUATVN ---
+      if (site === 'quatvn') {
+        const dr = /data-item="([^"]+)"/g; let m; const items = [];
+        while ((m = dr.exec(html))) {
+          try { const di = JSON.parse(m[1].replace(/&quot;/g, '"')); if (di.sources?.length) items.push(di); } catch {}
+        }
+        if (items.length) {
+          streamUrl = items[0].sources[0].src;
+          proxiedStreamUrl = streamUrl.includes('.m3u8')
+            ? `/api/proxy/sub.m3u8?url=${encodeURIComponent(streamUrl)}&site=${site}`
+            : `/api/proxy/mp4?url=${encodeURIComponent(streamUrl)}&site=${site}`;
+          quatvnPlaylist = items.map((item, idx) => ({
+            index: idx, title: item.fv_title || `Part ${idx+1}`,
+            streamUrl: item.sources[0].src,
+            proxiedStreamUrl: item.sources[0].src.includes('.m3u8')
+              ? `/api/proxy/sub.m3u8?url=${encodeURIComponent(item.sources[0].src)}&site=${site}`
+              : `/api/proxy/mp4?url=${encodeURIComponent(item.sources[0].src)}&site=${site}`,
+            thumbnail: item.splash || thumbnail, videoId: item.id?.toString() || null
+          }));
+        }
+      }
+
+      // --- SEXBJCAM ---
+      if (site === 'sexbjcam') {
+        const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
+        if (ifm) {
+          // Thử fetch embed để tìm source
+          try {
+            const embedHtml = await fetchText(ifm[1], 'https://sexbjcam.com/');
+            // Tìm bất kỳ URL video nào
+            const vidUrls = embedHtml.match(/"(https?:\/\/[^"]+\.(?:m3u8|mp4))"/g);
+            if (vidUrls && vidUrls.length) {
+              streamUrl = vidUrls[0].replace(/"/g, '');
+              proxiedStreamUrl = streamUrl;
+              console.log(`[SexBJCam] Found stream via embed: ${streamUrl.slice(0, 60)}`);
+            }
+          } catch {}
+        }
+      }
+
+      // --- JAVHDZ ---
+      if (site === 'javhdz') {
+        // 1. Try atob
+        const b64 = html.match(/window\.atob\("([A-Za-z0-9+/=]+)"\)/);
+        if (b64) {
+          try {
+            const dec = Buffer.from(b64[1], 'base64').toString();
+            if (dec.startsWith('http')) { streamUrl = dec; }
+          } catch {}
+        }
+        // 2. Fallback: tìm m3u8 URL trong HTML
+        if (!streamUrl) {
+          const m3 = html.match(/"((https?:)?\/\/[^"]+\.m3u8[^"]*)"/);
+          if (m3) { streamUrl = m3[1].startsWith('//') ? 'https:' + m3[1] : m3[1]; }
+        }
+        if (streamUrl) {
+          proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=${site}`;
+        }
+      }
+
+      // VTT thumbnails
+      const vttMatch = html.match(/"([^"]+\.vtt)"[\s\S]{0,50}kind:\s*"thumbnails"/) ||
+                       html.match(/"([^"]+thumbnails\.vtt)"/) ||
+                       html.match(/file:\s*"([^"]+\.vtt)"/);
+      let vttUrl = null, proxiedVtt = null;
+      if (vttMatch) { vttUrl = vttMatch[1]; proxiedVtt = `/api/proxy/vtt?url=${encodeURIComponent(vttUrl)}&site=${site}`; }
+
+      // Servers
+      const servers = [];
+      if (site === 'vlxx') {
+        const sr = /onclick="server\((\d+),(\d+)\)"/g; let m;
+        while ((m = sr.exec(html))) servers.push({ id: parseInt(m[1]), name: `Server ${m[1]}` });
+      } else if (site === 'javhdz') {
+        servers.push({ id: 1, name: 'Server 1 (HLS)' });
+        const sr = /<span class="server"[^>]*onclick="server\(\d+,(\d+)\)"[^>]*>([^<]+)<\/span>/g; let m;
+        while ((m = sr.exec(html))) if (parseInt(m[1]) !== 1) servers.push({ id: parseInt(m[1]), name: m[2] });
+      } else if (site === 'quatvn') {
+        servers.push({ id: 1, name: 'Server 1' });
+      }
+
+      const result = {
+        success: true, videoId, title, description, thumbnail, tags, servers,
+        streamUrl, proxiedStreamUrl, vttUrl, proxiedVtt, playlist: quatvnPlaylist
+      };
+
+      // Lưu cache
+      detailCache.set(cacheKey, { data: result, ts: Date.now() });
+      return sendJSON(res, result);
+
+    // ==================== API: SERVER SOURCE ====================
+    } else if (pathname === '/api/server-source') {
+      const id = parsed.searchParams.get('id');
+      const serverId = parsed.searchParams.get('server');
+      const refPath = parsed.searchParams.get('referer') || '';
+      if (!id || !serverId) return sendJSON(res, { success: false, error: 'id and server required' }, 400);
+      const ref = refPath ? `${HOST}${refPath}` : `${HOST}/`;
+
+      let playerHtml = null, iframeSrc = null;
+      if (site === 'vlxx') {
+        try {
+          const postData = 'vlxx_server=1&id=' + id + '&server=' + serverId;
+          const resp = await new Promise(resolve => {
+            const req = https.request('https://vlxx.moi/ajax.php', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': ref, 'User-Agent': UA },
+              agent: AGENTS.https
+            }, r => { const c = []; r.on('data', d => c.push(d)); r.on('end', () => { try { resolve(JSON.parse(Buffer.concat(c).toString())); } catch { resolve(null); } }); });
+            req.on('error', () => resolve(null));
+            req.write(postData); req.end();
+          });
+          if (resp?.player) {
+            playerHtml = resp.player;
+            const sm = playerHtml.match(/iframe[^>]*src="([^"]+)"/) || playerHtml.match(/src='([^']+)'/);
+            iframeSrc = sm?.[1] || null;
+          }
+        } catch {}
+      } else {
+        try {
+          const postData = JSON.stringify({ id: parseInt(id), server: parseInt(serverId) });
+          const mod = HOST.startsWith('https:') ? https : http;
+          const req = mod.request(HOST + '/ajax', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Referer': ref, 'User-Agent': UA },
+            agent: HOST.startsWith('https:') ? AGENTS.https : AGENTS.http
+          }, r => {
+            const c = []; r.on('data', d => c.push(d)); r.on('end', () => {
+              try { const data = JSON.parse(Buffer.concat(c).toString()); if (data?.player) { playerHtml = data.player; const sm = data.player.match(/iframe[^>]*src="([^"]+)"/) || data.player.match(/src='([^']+)'/); iframeSrc = sm?.[1] || null; } } catch {}
+              sendJSON(res, { success: true, playerHtml, iframeSrc });
+            });
+          });
+          req.on('error', () => sendJSON(res, { success: false }));
+          req.write(postData); req.end();
+          return; // response sent in callback
+        } catch {}
+      }
+      return sendJSON(res, { success: true, playerHtml, iframeSrc });
+
+    // ==================== API: DOWNLOADS ====================
+    } else if (pathname === '/api/downloads') {
+      const id = parsed.searchParams.get('id');
+      const refPath = parsed.searchParams.get('referer') || '';
+      if (!id) return sendJSON(res, { success: false, error: 'id required' }, 400);
+      const ref = refPath ? `${HOST}${refPath}` : `${HOST}/`;
+      const downloads = [];
+
+      if (site === 'quatvn') {
+        try {
+          const html = await fetchText(`${HOST}${refPath.startsWith('/') ? refPath : '/' + refPath}`, HOST + '/');
+          const dm = html.match(/data-item="([^"]+)"/);
+          if (dm) { const di = JSON.parse(dm[1].replace(/&quot;/g, '"')); if (di.sources?.length) downloads.push({ label: 'Direct MP4', url: di.sources[0].src }); }
+        } catch {}
+      } else if (site === 'vlxx') {
+        try {
+          const text = await new Promise(resolve => {
+            const req = https.request('https://vlxx.moi/ajax.php', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': ref, 'User-Agent': UA },
+              agent: AGENTS.https
+            }, r => { const c = []; r.on('data', d => c.push(d)); r.on('end', () => resolve(Buffer.concat(c).toString())); });
+            req.on('error', () => resolve(''));
+            req.write('vlxx_download=1&id=' + id); req.end();
+          });
+          let data; try { data = JSON.parse(text); } catch { data = { download: text }; }
+          if (data?.download) {
+            const lr = /<a[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/g; let m;
+            while ((m = lr.exec(data.download))) {
+              let u = m[1];
+              if (u.includes('/goto.html?url=')) { try { const dec = Buffer.from(u.split('/goto.html?url=')[1], 'base64').toString(); if (dec.startsWith('http')) u = dec; } catch {} }
+              downloads.push({ label: m[2], url: u });
+            }
+          }
+        } catch {}
+      } else {
+        try {
+          const data = await new Promise(resolve => {
+            const mod = HOST.startsWith('https:') ? https : http;
+            const req = mod.request(HOST + '/download', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Referer': ref, 'User-Agent': UA },
+              agent: mod === https ? AGENTS.https : AGENTS.http
+            }, r => { const c = []; r.on('data', d => c.push(d)); r.on('end', () => { try { resolve(JSON.parse(Buffer.concat(c).toString())); } catch { resolve(null); } }); });
+            req.on('error', () => resolve(null));
+            req.write(JSON.stringify({ id: parseInt(id), server: 1 })); req.end();
+          });
+          if (data?.download) {
+            const lr = /<a[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/g; let m;
+            while ((m = lr.exec(data.download))) {
+              let u = m[1];
+              if (u.includes('/goto.html?url=')) { try { const dec = Buffer.from(u.split('/goto.html?url=')[1], 'base64').toString(); if (dec.startsWith('http')) u = dec; } catch {} }
+              downloads.push({ label: m[2], url: u });
+            }
+          }
+        } catch {}
+      }
+      return sendJSON(res, { success: true, downloads });
+
+    // ==================== API: CACHE STATUS ====================
+    } else if (pathname === '/api/cache-status') {
+      const plUrl = parsed.searchParams.get('pl');
+      if (!plUrl) return sendJSON(res, { success: false, error: 'Missing pl' }, 400);
+
+      try {
+        const raw = await fetchText(plUrl, HOST + '/');
+        const base = plUrl.substring(0, plUrl.lastIndexOf('/') + 1);
+        let total = 0, cached = 0, totalBytes = 0, cachedBytes = 0;
+
+        for (const line of raw.split('\n')) {
+          const t = line.trim();
+          if (!t || t.startsWith('#')) continue;
+          total++;
+          const abs = t.startsWith('http') ? t : (t.startsWith('/') ? new URL(plUrl).origin + t : base + t);
+          const fp = cachePath(abs);
+          if (fs.existsSync(fp)) {
+            cached++;
+            try { const sz = fs.statSync(fp).size; cachedBytes += sz; } catch {}
+          }
+          // Estimate total size from first non-cached segment? Skip.
+        }
+
+        return sendJSON(res, {
+          success: true,
+          total,
+          cached,
+          progress: total > 0 ? Math.round(cached / total * 100) : 0,
+          cachedBytes,
+          ready: cached === total
+        });
+      } catch (e) {
+        return sendJSON(res, { success: false, error: e.message });
+      }
+
+    // ==================== API: DOWNLOAD CACHED ====================
+    } else if (pathname === '/api/download-cached') {
+      let plUrl = parsed.searchParams.get('pl');
+      if (!plUrl) { res.writeHead(400); return res.end('Missing pl'); }
+      const force = parsed.searchParams.get('force') === '1';
+
+      try {
+        let raw = await fetchText(plUrl, HOST + '/');
+
+        // Nếu là master playlist, tìm sub-playlist chất lượng cao nhất
+        if (raw.includes('#EXT-X-STREAM-INF')) {
+          const streams = [];
+          let curInfo = null;
+          for (const line of raw.split('\n')) {
+            const t = line.trim();
+            if (t.startsWith('#EXT-X-STREAM-INF')) curInfo = t;
+            else if (!t.startsWith('#') && t) {
+              const h = parseInt(curInfo?.match(/RESOLUTION=\d+x(\d+)/)?.[1] || 0);
+              const abs = t.startsWith('http') ? t : (t.startsWith('/') ? new URL(plUrl).origin + t : plUrl.substring(0, plUrl.lastIndexOf('/') + 1) + t);
+              streams.push({ url: abs, height: h });
+              curInfo = null;
+            }
+          }
+          streams.sort((a, b) => b.height - a.height);
+          if (!streams.length) throw new Error('No sub-playlists found');
+          plUrl = streams[0].url;
+          console.log(`[DOWNLOAD] Best quality: ${streams[0].height}p`);
+          raw = await fetchText(plUrl, HOST + '/');
+        }
+
+        const base = plUrl.substring(0, plUrl.lastIndexOf('/') + 1);
+        const segments = [];
+        const needFetch = [];
+
+        for (const line of raw.split('\n')) {
+          const t = line.trim();
+          if (!t || t.startsWith('#')) continue;
+          const abs = t.startsWith('http') ? t : (t.startsWith('/') ? new URL(plUrl).origin + t : base + t);
+          const fp = cachePath(abs);
+          if (fs.existsSync(fp)) {
+            segments.push({ abs, cached: true, path: fp });
+          } else {
+            segments.push({ abs, cached: false });
+            needFetch.push(abs);
+          }
+        }
+
+        // Nếu chưa cache hết
+        if (needFetch.length > 0) {
+          if (!force) {
+            // Trả về JSON báo progress, không download
+            let cachedBytes = 0;
+            for (const seg of segments) {
+              if (seg.cached && seg.path) { try { cachedBytes += fs.statSync(seg.path).size; } catch {} }
+            }
+            return sendJSON(res, {
+              success: false,
+              error: 'CACHE_NOT_READY',
+              total: segments.length,
+              cached: segments.length - needFetch.length,
+              progress: Math.round((segments.length - needFetch.length) / segments.length * 100),
+              cachedBytes,
+              message: `Cache chưa sẵn sàng (${segments.length - needFetch.length}/${segments.length}). Bấm lại sau khi xem thêm!`
+            });
+          }
+
+          // force=1: fetch nốt rồi download
+          console.log(`[DOWNLOAD] Fetching ${needFetch.length} missing segments...`);
+          for (let i = 0; i < needFetch.length; i += PREFETCH_CONCURRENCY) {
+            await Promise.all(needFetch.slice(i, i + PREFETCH_CONCURRENCY).map(async url => {
+              try { const buf = await fetchBuffer(url, HOST + '/'); if (buf && buf.length > 100) cacheSet(url, buf); } catch {}
+            }));
+          }
+          for (const seg of segments) {
+            if (!seg.cached) { const fp = cachePath(seg.abs); if (fs.existsSync(fp)) { seg.cached = true; seg.path = fp; } }
+          }
+        }
+
+        // Kiểm tra lại: nếu vẫn còn thiếu, đếm và báo
+        const stillMissing = segments.filter(s => !s.cached).length;
+        if (stillMissing > 0) {
+          console.warn(`[DOWNLOAD] ${stillMissing}/${segments.length} segments failed to fetch — file sẽ bị thiếu!`);
+          if (!force && stillMissing > segments.length * 0.1) {
+            return sendJSON(res, {
+              success: false, error: 'TOO_MANY_MISSING',
+              total: segments.length, cached: segments.length - stillMissing,
+              progress: Math.round((segments.length - stillMissing) / segments.length * 100),
+              message: `Còn ${stillMissing} segment không tải được. Thử lại sau.`
+            });
+          }
+        }
+
+        // Stream file TS
+        const safeName = plUrl.split('/').pop().replace(/[^a-zA-Z0-9_-]/g, '_') || 'video';
+        res.writeHead(200, {
+          'Content-Type': 'video/MP2T',
+          'Content-Disposition': `attachment; filename="${safeName.replace(/\.m3u8$/, '')}.ts"`,
+          'Access-Control-Allow-Origin': '*',
+          'Transfer-Encoding': 'chunked'
+        });
+
+        for (const seg of segments) {
+          if (seg.cached && seg.path) { res.write(fs.readFileSync(seg.path)); }
+        }
+        res.end();
+        const finalCached = segments.filter(s => s.cached).length;
+        console.log(`[DOWNLOAD] Done: ${finalCached}/${segments.length} segments (${stillMissing} missing)`);
+      } catch (e) {
+        if (!res.headersSent) { res.writeHead(500); res.end('Download failed: ' + e.message); }
+      }
+
+    // ==================== PROXY: PLAYLIST M3U8 ====================
+    } else if (pathname === '/api/proxy/pl.m3u8') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+      const raw = await fetchText(targetUrl, HOST + '/');
+      const base = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      const isMaster = raw.includes('#EXT-X-STREAM-INF');
+      const outLines = [];
+
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('#') || !t) { outLines.push(line); continue; }
+        const abs = t.startsWith('http') ? t : (t.startsWith('/') ? new URL(targetUrl).origin + t : base + t);
+        outLines.push(isMaster
+          ? `/api/proxy/pl.m3u8?url=${encodeURIComponent(abs)}&s=${site}`
+          : `/api/proxy/seg.ts?url=${encodeURIComponent(abs)}&pl=${encodeURIComponent(targetUrl)}&s=${site}`);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/x-mpegURL', 'Access-Control-Allow-Origin': '*' });
+      res.end(outLines.join('\n'));
+
+      // Prefetch nếu là sub-playlist
+      if (!isMaster) {
+        const urls = [];
+        for (const line of raw.split('\n')) {
+          const t = line.trim();
+          if (!t || t.startsWith('#')) continue;
+          urls.push(t.startsWith('http') ? t : (t.startsWith('/') ? new URL(targetUrl).origin + t : base + t));
+        }
+        if (urls.length) { prefetchToEnd(urls, 0, HOST, targetUrl); console.log(`[PREFETCH] ${urls.length} segments`); }
+      }
+
+    // ==================== PROXY: SEGMENT ====================
+    } else if (pathname === '/api/proxy/seg.ts') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+      const plUrl = parsed.searchParams.get('pl');
+      let buf = cacheGet(targetUrl);
+      const hit = !!buf;
+      if (!buf) { buf = await fetchAndCacheSegment(targetUrl, HOST); if (!buf) { res.writeHead(502); return res.end('Fetch failed'); } }
+      res.writeHead(200, { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' });
+      res.end(buf);
+      if (hit && plUrl) getPlaylistSegments(plUrl, HOST).then(u => { const i = u.indexOf(targetUrl); if (i !== -1) prefetchToEnd(u, i, HOST, plUrl); }).catch(() => {});
+
+    // ==================== PROXY: VTT ====================
+    } else if (pathname === '/api/proxy/vtt') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+      const data = await fetchText(targetUrl, HOST + '/');
+      const base = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      res.writeHead(200, { 'Content-Type': 'text/vtt', 'Access-Control-Allow-Origin': '*' });
+      res.end(data.split('\n').map(l => {
+        const t = l.trim();
+        if (!t.includes('.jpg') && !t.includes('.png')) return l;
+        const [fn, h] = t.split('#');
+        const abs = fn.startsWith('http') ? fn : base + fn;
+        return `/api/proxy/image?url=${encodeURIComponent(abs)}&site=${site}` + (h ? '#' + h : '');
+      }).join('\n'));
+
+    // ==================== PROXY: IMAGE ====================
+    } else if (pathname === '/api/proxy/image') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+      try {
+        const buf = await fetchBuffer(targetUrl, HOST + '/');
+        const ct = 'image/jpeg';
+        res.writeHead(200, { 'Content-Type': ct, 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400' });
+        res.end(buf);
+      } catch {
+        res.writeHead(502); res.end('Image fetch failed');
+      }
+
+    // ==================== PROXY: MP4 (quatvn) ====================
+    } else if (pathname === '/api/proxy/mp4') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+
+      // Cache key cho MP4
+      const cacheKey = 'mp4:' + targetUrl;
+      const cached = detailCache.get(cacheKey);
+      let buf = null;
+
+      if (cached && cached.buf) {
+        buf = cached.buf;
+        console.log(`[MP4 CACHE HIT] ${targetUrl.split('/').pop()}`);
+      } else {
+        try {
+          buf = await fetchBuffer(targetUrl, HOST + '/');
+          if (buf && buf.length > 1000) {
+            detailCache.set(cacheKey, { buf, ts: Date.now() });
+          }
+        } catch {
+          res.writeHead(502); return res.end('MP4 fetch failed');
+        }
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'video/mp4',
+        'Content-Length': buf.length,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=86400',
+        'Accept-Ranges': 'bytes'
+      });
+      res.end(buf);
+
+    // ==================== API: SITES ====================
+    } else if (pathname === '/api/sites') {
+      return sendJSON(res, {
+        success: true,
+        sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : 'SexBJCam', base: v.base }
+        ]))
+      });
+
+    // ==================== STATIC FILES ====================
+    } else {
+      let fp = pathname === '/' ? '/index.html' : pathname;
+      serveStatic(res, path.join(__dirname, 'public', fp));
+    }
+  } catch (error) {
+    console.error('[ERROR]', error.message);
+    if (!res.headersSent) sendJSON(res, { success: false, error: error.message }, 500);
+  }
+});
+
+// Cache maintenance
+setInterval(() => {
+  const now = Date.now();
+  for (const [url, entry] of playlistCache) { if (now - entry.ts > PLAYLIST_TTL) playlistCache.delete(url); }
+  for (const [key, entry] of detailCache) { if (now - entry.ts > 300000) detailCache.delete(key); }
+  try {
+    let expired = 0, released = 0;
+    for (const f of fs.readdirSync(CACHE_DIR)) {
+      const fp = path.join(CACHE_DIR, f);
+      const s = fs.statSync(fp);
+      if (now - s.mtimeMs > SEGMENT_TTL) { fs.unlinkSync(fp); expired++; released += s.size; }
+    }
+    if (expired) console.log(`[CACHE] Cleaned ${expired} files, released ${(released/1e6).toFixed(1)}MB`);
+  } catch {}
+}, 30 * 60 * 1000);
+
+server.listen(PORT, () => {
+  console.log('╔═══════════════════════════════════════════╗');
+  console.log('║     Netflix-Style Proxy Server 🎬         ║');
+  console.log(`║     Local: http://localhost:${PORT}          ║`);
+  console.log(`║     Cache: ${(MAX_DISK_CACHE/1e9).toFixed(1)}GB · KeepAlive ON     ║`);
+  console.log('╚═══════════════════════════════════════════╝');
+});

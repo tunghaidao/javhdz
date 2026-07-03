@@ -1,0 +1,8 @@
+node_modules/
+.video_cache/
+.env
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.hermes/

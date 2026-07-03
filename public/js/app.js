@@ -28,6 +28,16 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return;
     }
+    // Mũi tên trái/phải = tua 10s
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && isOpen) {
+      const video = document.getElementById('videoPlayer');
+      if (video && video.duration) {
+        const seek = e.key === 'ArrowLeft' ? -30 : 30;
+        video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seek));
+      }
+      e.preventDefault();
+      return;
+    }
     if ((e.key === 'f' || e.key === 'F') && isOpen) {
       const video = document.getElementById('videoPlayer');
       const wrap = document.getElementById('playerWrap');
@@ -89,6 +99,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   document.querySelector('.menu-toggle').addEventListener('click', () => { document.getElementById('navLinks').classList.toggle('open'); });
+
+  // Hiện nút yêu thích nếu có dữ liệu cũ
+  updateFavNav();
 
   loadVideos();
 });

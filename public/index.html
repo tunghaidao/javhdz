@@ -17,10 +17,11 @@
           <a href="#" class="active" data-site="javhdz" onclick="return switchSite(event,'javhdz')">JavHDz</a>
           <a href="#" data-site="vlxx" onclick="return switchSite(event,'vlxx')">VLXX</a>
           <a href="#" data-site="quatvn" onclick="return switchSite(event,'quatvn')">QuạtVN</a>
-          <a href="#" data-site="sexbjcam" onclick="return switchSite(event,'sexbjcam')">SexBJCam</a>
+          <a href="#" data-site="sexbjcam">SexBJCam</a>
         </div>
       </div>
       <div class="nav-right">
+        <a href="#" id="favNavLink" style="color:#e50914;font-size:14px;font-weight:600;margin-right:8px;display:none" onclick="event.preventDefault();showFavorites()">♥ Yêu thích</a>
         <div class="search-box">
           <input type="text" id="searchInput" placeholder="Tìm kiếm..." onkeydown="if(event.key==='Enter')doSearch()">
           <button onclick="doSearch()">🔍</button>
@@ -76,6 +77,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script src="/js/app.js"></script>
+  <script src="/js/app.js?v=3"></script>
 </body>
 </html>

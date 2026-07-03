@@ -43,13 +43,30 @@ document.addEventListener('DOMContentLoaded', () => {
   // Event delegation
   document.addEventListener('click', e => {
     const card = e.target.closest('.card');
-    if (card) { const idx = card.dataset.idx; if (idx !== undefined && allVideos[idx]) openPlayer(allVideos[idx]); return; }
+    if (card) {
+      const idx = card.dataset.idx;
+      if (idx !== undefined && allVideos[idx]) {
+        const v = allVideos[idx];
+        const origSite = v._site || currentSite;
+        openPlayer(v, origSite);
+      }
+      return;
+    }
+    const heart = e.target.closest('.card-fav');
+    if (heart) {
+      e.stopPropagation();
+      const idx = heart.dataset.idx;
+      if (idx !== undefined && allVideos[idx]) toggleFavorite(allVideos[idx]);
+      return;
+    }
     const catBtn = e.target.closest('.cat-btn');
     if (catBtn) { filterCategory(catBtn.dataset.slug); return; }
     const navLink = e.target.closest('.nav-links a');
     if (navLink) { switchSite(navLink.dataset.site); return; }
     const logo = e.target.closest('.logo');
     if (logo) { e.preventDefault(); switchSite('javhdz'); return; }
+    const favLink = e.target.closest('#favNavLink');
+    if (favLink) { e.preventDefault(); showFavorites(); return; }
     const searchBtn = e.target.closest('.search-box button');
     if (searchBtn) { doSearch(); return; }
     const pageBtn = e.target.closest('.page-btn');
@@ -62,6 +79,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (close) { closePlayer(); return; }
     const dlBtn = e.target.closest('.dl-btn');
     if (dlBtn) { if (dlBtn.dataset.url) downloadCached(dlBtn.dataset.url); return; }
+    // Click hero banner → phát video đầu
+    if (e.target.closest('.hero') && !e.target.closest('.btn-secondary')) {
+      if (allVideos[0]) openPlayer(allVideos[0]);
+      return;
+    }
     if (e.target.closest('.player-overlay') && !e.target.closest('.player-container')) { closePlayer(); }
   });
 
@@ -163,7 +185,8 @@ function renderCard(v, idx) {
   const thumb = v.thumbnail || '';
   const title = v.title || 'Khong co tieu de';
   const views = v.views || 'N/A';
-  return `<div class="card" data-idx="${idx}"><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}</div></div><div class="card-overlay"><span class="card-play">▶</span></div></div>`;
+  const faved = isFavorite(v);
+  return `<div class="card" data-idx="${idx}"><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}</div></div><div class="card-overlay"><span class="card-play">▶</span><span class="card-fav ${faved ? 'faved' : ''}" data-idx="${idx}" style="position:absolute;top:8px;right:8px;font-size:20px;cursor:pointer;text-shadow:0 1px 4px rgba(0,0,0,.8)">${faved ? '♥' : '♡'}</span></div></div>`;
 }
 
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -174,7 +197,58 @@ function changePage(delta) { currentPage += delta; if (currentPage < 1) currentP
 let currentHls = null;
 let currentVideoPath = '';
 
-async function openPlayer(video) {
+// Favorites
+const FAV_KEY = 'netflix_favs';
+
+function getFavorites() {
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+}
+
+function saveFavorites(favs) {
+  localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+  updateFavNav();
+}
+
+function updateFavNav() {
+  const favs = getFavorites();
+  const link = document.getElementById('favNavLink');
+  if (link) {
+    link.style.display = favs.length ? 'inline' : 'none';
+    link.textContent = '♥ ' + favs.length;
+  }
+}
+
+function toggleFavorite(video) {
+  const favs = getFavorites();
+  const key = currentSite + ':' + video.path;
+  const idx = favs.findIndex(f => f.key === key);
+  if (idx > -1) { favs.splice(idx, 1); } else { favs.push({ key, site: currentSite, path: video.path, title: video.title, thumbnail: video.thumbnail }); }
+  saveFavorites(favs);
+  // Re-render cards to update hearts
+  renderRows(allVideos);
+}
+
+function isFavorite(video) {
+  const key = currentSite + ':' + video.path;
+  return getFavorites().some(f => f.key === key);
+}
+
+function showFavorites() {
+  closePlayer();
+  const favs = getFavorites();
+  const content = document.getElementById('content');
+  if (!favs.length) { content.innerHTML = '<div class="loading-screen"><p style="color:#aaa">Chua co video yeu thich.</p></div>'; return; }
+  currentSite = 'fav';
+  document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
+  document.getElementById('favNavLink').style.color = '#fff';
+  // Render favorites with site data attributes
+  const vids = favs.map(f => ({ title: f.title, path: f.path, thumbnail: f.thumbnail, views: '♥', _site: f.site }));
+  allVideos = vids;
+  renderRows(vids);
+}
+
+async function openPlayer(video, optSite) {
+  const site = optSite || currentSite;
   const overlay = document.getElementById('playerOverlay');
   document.getElementById('playerTitle').textContent = video.title || 'Dang tai...';
   overlay.classList.add('open');
@@ -182,16 +256,56 @@ async function openPlayer(video) {
   playerWrap.innerHTML = '<div class="loading-screen" style="padding:40px 0"><div class="spinner"></div><p>Dang tai video...</p></div>';
 
   const path = video.path || '';
-  const detail = await apiFetch(`/api/video-detail?path=${encodeURIComponent(path)}&site=${currentSite}`);
+  const detail = await apiFetch(`/api/video-detail?path=${encodeURIComponent(path)}&site=${site}`);
   if (!detail.success) { playerWrap.innerHTML = '<div class="loading-screen"><p style="color:#e50914">Khong the tai video.</p></div>'; return; }
 
   document.getElementById('playerTitle').textContent = detail.title || video.title;
+  // Heart trong player header
+  const isFav = getFavorites().some(f => f.key === site + ':' + video.path);
+  const existingHeart = document.getElementById('playerHeart');
+  if (existingHeart) existingHeart.remove();
+  const heartBtn = document.createElement('button');
+  heartBtn.id = 'playerHeart';
+  heartBtn.textContent = isFav ? '♥' : '♡';
+  heartBtn.style.cssText = 'background:none;border:none;color:' + (isFav ? '#e50914' : '#fff') + ';font-size:22px;cursor:pointer;opacity:.8;margin-right:8px;flex-shrink:0';
+  heartBtn.onclick = () => {
+    toggleFavorite(video);
+    heartBtn.textContent = getFavorites().some(f => f.key === site + ':' + video.path) ? '♥' : '♡';
+    heartBtn.style.color = getFavorites().some(f => f.key === site + ':' + video.path) ? '#e50914' : '#fff';
+  };
+  document.getElementById('playerTitle').parentNode.insertBefore(heartBtn, document.getElementById('playerTitle'));
   document.getElementById('playerTags').innerHTML = (detail.tags || []).slice(0, 10).map(t => `<span class="player-tag" data-slug="${escHtml(t.slug)}">${escHtml(t.name)}</span>`).join('');
   document.getElementById('playerDesc').innerHTML = detail.description ? `<p>${detail.description}</p>` : '';
 
-  // Download button
+  // Download yt-dlp command
   const streamUrl = detail.streamUrl || '';
-  document.getElementById('playerActions').innerHTML = streamUrl ? `<button class="btn-secondary dl-btn" data-url="${encodeURIComponent(streamUrl)}" style="font-size:13px;padding:6px 14px">⬇ Tai tu cache</button>` : '';
+  document.getElementById('playerActions').innerHTML = '';
+  // Xoá command cũ nếu có
+  const oldCmd = document.querySelector('.dl-cmd-row');
+  if (oldCmd) oldCmd.remove();
+
+  if (streamUrl) {
+    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com' };
+    const host = hostMap[site] || 'javhdz.ws';
+    // Dùng proxy URL (qua server) thay vì CDN gốc — tránh Cloudflare
+    const proxyUrl = detail.proxiedStreamUrl || streamUrl;
+    const fullUrl = proxyUrl.startsWith('http') ? proxyUrl : 'http://localhost:3000' + proxyUrl;
+    const safeTitle = (detail.title || video.title || 'video').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 100);
+    const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${host}/" -o "${safeTitle}.%(ext)s" --force-overwrites '${fullUrl}'`;
+
+    // Tự copy vào clipboard
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).catch(() => {});
+    }
+
+    const cmdRow = document.createElement('div');
+    cmdRow.className = 'dl-cmd-row';
+    cmdRow.style.cssText = 'margin:6px 20px 0;padding:8px 0;border-top:1px solid #2a2a2a';
+    cmdRow.innerHTML = `<div style="font-size:11px;color:#666;margin-bottom:4px">📋 yt-dlp <span style="color:#444">(đã copy vào clipboard)</span></div>
+      <pre style="background:#0d0d0d;color:#0f0;padding:6px 10px;border-radius:4px;font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer;margin:0" 
+        onclick="navigator.clipboard.writeText(this.textContent);this.style.color='#fff';setTimeout(()=>this.style.color='#0f0',1000)">${escHtml(cmd)}</pre>`;
+    document.getElementById('playerActions').insertAdjacentElement('afterend', cmdRow);
+  }
 
   // Playlist parts
   const playlist = detail.playlist || [];
@@ -212,7 +326,7 @@ async function openPlayer(video) {
   // Load video player
   const hlsUrl = detail.proxiedStreamUrl || detail.streamUrl;
   if (!hlsUrl) {
-    if (currentSite === 'sexbjcam') {
+    if (site === 'sexbjcam') {
       // Mở trang gốc trong iframe — cách duy nhất để xem Stripchat embed
       playerWrap.innerHTML = `<iframe src="https://sexbjcam.com${video.path}" style="width:100%;height:100%;position:absolute;top:0;left:0;border:none" allowfullscreen></iframe>`;
       const badge = document.createElement('span');
@@ -226,7 +340,7 @@ async function openPlayer(video) {
   }
 
   currentVideoPath = video.path || '';
-  loadVideoSource(hlsUrl, currentSite, currentVideoPath, playerWrap);
+  loadVideoSource(hlsUrl, site, currentVideoPath, playerWrap);
 }
 
 function loadVideoSource(url, site, path, playerWrap) {
@@ -322,26 +436,39 @@ function downloadCached(encodedUrl) {
   const url = decodeURIComponent(encodedUrl);
   if (!url) return;
   const btn = document.querySelector('.dl-btn');
-  if (btn) { btn.textContent = '⏳ Dang kiem tra...'; btn.disabled = true; }
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  const dlSite = btn ? (btn.dataset.site || currentSite) : currentSite;
 
-  fetch(`/api/download-cached?pl=${encodeURIComponent(url)}&s=${currentSite}`)
-    .then(r => {
-      const ct = r.headers.get('content-type') || '';
-      if (ct.includes('video/') || r.headers.get('content-disposition')) {
-        const a = document.createElement('a');
-        a.href = `/api/download-cached?pl=${encodeURIComponent(url)}&s=${currentSite}`;
-        a.download = ''; a.click();
-        if (btn) { btn.textContent = '✅ Da tai!'; btn.disabled = false; }
-        return null;
-      }
-      return r.json().then(data => data);
-    })
-    .then(data => {
-      if (!data) return;
-      if (data.error === 'CACHE_NOT_READY') alert(`⏳ Cache chua san sang (${data.progress}%)\n${data.message}\n\n👉 Hay xem them video roi bam tai lai!`);
-      else if (data.error === 'TOO_MANY_MISSING') alert(`❌ Nhieu segment loi (${data.progress}%)\n${data.message}`);
-      else if (!data.success) alert('❌ Khong the tai. Thu lai sau.');
-      if (btn) { btn.textContent = '⬇ Tai tu cache'; btn.disabled = false; }
-    })
-    .catch(() => { alert('❌ Loi ket noi.'); if (btn) { btn.textContent = '⬇ Tai tu cache'; btn.disabled = false; } });
+  // Lấy stream URL gốc + tạo lệnh yt-dlp
+  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
+  
+  // Copy vào clipboard
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).catch(() => {});
+  }
+
+  // Hiển thị lệnh để copy — popup lớn
+  const existingCmd = document.querySelector('.dl-command-overlay');
+  if (existingCmd) existingCmd.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'dl-command-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1a1a2e;border-radius:12px;padding:24px;max-width:700px;width:100%;box-shadow:0 8px 40px rgba(0,0,0,.5)';
+  box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <span style="font-size:16px;font-weight:700;color:#fff">📋 Lệnh tải video</span>
+    <span onclick="this.closest('.dl-command-overlay').remove()" style="cursor:pointer;font-size:20px;color:#999">&times;</span>
+  </div>
+  <div style="font-size:13px;color:#aaa;margin-bottom:10px">Đã copy vào clipboard. Paste vào terminal:</div>
+  <pre style="background:#0d0d0d;color:#0f0;padding:12px 16px;border-radius:6px;font-size:13px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer;user-select:all;border:1px solid #333" 
+    onclick="navigator.clipboard.writeText(this.textContent);this.style.borderColor='#0f0';setTimeout(()=>this.style.borderColor='#333',1000)">${escHtml(cmd)}</pre>
+  <div style="font-size:11px;color:#666;margin-top:8px;text-align:center">Click vào lệnh để copy lại &bull; Đóng = bấm ra ngoài hoặc ✕</div>`;
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  if (btn) { btn.textContent = '✅ Da copy!'; setTimeout(() => { btn.textContent = '⬇ yt-dlp'; btn.disabled = false; }, 3000); }
 }

@@ -8,6 +8,7 @@ let currentSearch = '';
 let allVideos = [];
 let allCategories = [];
 let totalPages = 1;
+let allStudioRows = [];
 
 // ===================== INIT =====================
 document.addEventListener('DOMContentLoaded', () => {
@@ -82,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const pageBtn = e.target.closest('.page-btn');
     if (pageBtn) { const d = parseInt(pageBtn.dataset.delta); if (d) changePage(d); return; }
     const tag = e.target.closest('.player-tag');
-    if (tag) { filterByTag(tag.dataset.slug); return; }
+    if (tag) { filterByTag(tag.dataset.slug, tag.dataset.type); return; }
     const part = e.target.closest('.player-part');
     if (part) { switchPart(part); return; }
     const close = e.target.closest('.player-close');
@@ -142,6 +143,7 @@ async function loadVideos() {
   }
   allVideos = data.videos;
   allCategories = data.categories || [];
+  allStudioRows = data.studioRows || [];
   totalPages = data.totalPages || Math.max(1, Math.ceil(allVideos.length / 20) + 1);
   renderHero(allVideos);
   renderCategories(allCategories);
@@ -177,19 +179,36 @@ function renderRows(videos) {
   const content = document.getElementById('content');
   if (!videos.length) { content.innerHTML = '<div class="loading-screen"><p style="color:#aaa">Khong co video.</p></div>'; return; }
 
-  const rows = [{ title: '🔥 De xuat cho ban', vids: videos.slice(0, 10) }];
-  if (videos.length > 10) rows.push({ title: '📌 Tiep theo', vids: videos.slice(10, 22) });
-  if (videos.length > 22) rows.push({ title: '🎬 Phim moi cap nhat', vids: videos.slice(22, 40) });
-  const remaining = videos.slice(40);
-  if (remaining.length) { for (let i = 0; i < remaining.length; i += 12) rows.push({ title: i === 0 ? '✨ Goi y them' : '📺 Xem them', vids: remaining.slice(i, i + 12) }); }
+  let rows;
+  if (currentSite === 'javtrailers' && allStudioRows.length) {
+    rows = [{ title: '🔥 De xuat cho ban', vids: videos.slice(0, 10) }];
+    for (const sr of allStudioRows) {
+      rows.push({ title: '🏢 ' + sr.studio.name, vids: sr.videos, studioSlug: sr.studio.slug });
+      for (const sv of sr.videos) { if (!allVideos.find(v => v.path === sv.path)) allVideos.push(sv); }
+    }
+  } else {
+    rows = [{ title: '🔥 De xuat cho ban', vids: videos.slice(0, 10) }];
+    if (videos.length > 10) rows.push({ title: '📌 Tiep theo', vids: videos.slice(10, 22) });
+    if (videos.length > 22) rows.push({ title: '🎬 Phim moi cap nhat', vids: videos.slice(22, 40) });
+    const remaining = videos.slice(40);
+    if (remaining.length) { for (let i = 0; i < remaining.length; i += 12) rows.push({ title: i === 0 ? '✨ Goi y them' : '📺 Xem them', vids: remaining.slice(i, i + 12) }); }
+  }
 
   let html = '<div class="rows-container">';
   for (const row of rows) {
     html += `<div class="row"><div class="row-header"><h3 class="row-title">${escHtml(row.title)}</h3><span class="row-count">${row.vids.length} video</span></div><div class="row-scroll">`;
     for (let i = 0; i < row.vids.length; i++) html += renderCard(row.vids[i], allVideos.indexOf(row.vids[i]));
+    if (row.studioSlug) {
+      html += `<div onclick="filterCategory('${row.studioSlug}')" style="flex:0 0 auto;width:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:#999;border-radius:8px;flex-shrink:0">
+        <div style="font-size:24px">→</div>
+        <div style="font-size:11px">Xem thêm</div>
+      </div>`;
+    }
     html += '</div></div>';
   }
   html += '</div>';
+
+
   html += `<div class="page-controls"><button class="page-btn" data-delta="-1" ${currentPage <= 1 ? 'disabled' : ''}>◀ Truoc</button><span class="page-info">Trang ${currentPage} / ${totalPages}</span><button class="page-btn" data-delta="1" ${currentPage >= totalPages ? 'disabled' : ''}>Sau ▶</button></div>`;
   content.innerHTML = html;
 }
@@ -203,6 +222,14 @@ function renderCard(v, idx) {
 }
 
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+function parseDuration(durStr) {
+  if (!durStr) return 0;
+  const parts = durStr.trim().split(':');
+  if (parts.length === 3) return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+  if (parts.length === 2) return parseInt(parts[0]);
+  return parseInt(parts[0]) || 0;
+}
 
 function changePage(delta) { currentPage += delta; if (currentPage < 1) currentPage = 1; loadVideos(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
 
@@ -287,7 +314,7 @@ async function openPlayer(video, optSite) {
     heartBtn.style.color = getFavorites().some(f => f.key === site + ':' + video.path) ? '#e50914' : '#fff';
   };
   document.getElementById('playerTitle').parentNode.insertBefore(heartBtn, document.getElementById('playerTitle'));
-  document.getElementById('playerTags').innerHTML = (detail.tags || []).slice(0, 10).map(t => `<span class="player-tag" data-slug="${escHtml(t.slug)}">${escHtml(t.name)}</span>`).join('');
+  document.getElementById('playerTags').innerHTML = (detail.tags || []).slice(0, 10).map(t => `<span class="player-tag" data-slug="${escHtml(t.slug)}" data-type="${t.type || ''}">${escHtml(t.name)}</span>`).join('');
   document.getElementById('playerDesc').innerHTML = detail.description ? `<p>${detail.description}</p>` : '';
 
   // Download yt-dlp command
@@ -462,10 +489,15 @@ function closePlayer() {
   overlay.classList.remove('open');
 }
 
-function filterByTag(slug) {
+function filterByTag(slug, type) {
   closePlayer();
-  currentCategory = slug; currentPage = 1; currentSearch = '';
-  document.getElementById('searchInput').value = '';
+  if (currentSite === 'javtrailers' && type === 'cast') {
+    document.getElementById('searchInput').value = slug.replace(/-/g, ' ');
+    currentSearch = slug.replace(/-/g, ' '); currentCategory = ''; currentPage = 1;
+  } else {
+    currentCategory = slug; currentPage = 1; currentSearch = '';
+    document.getElementById('searchInput').value = '';
+  }
   loadVideos();
 }
 

@@ -42,6 +42,14 @@ const playlistCache = new Map();
 const fetchPromises = new Map();
 const detailCache = new Map(); // 5 min cache cho video-detail
 
+function parseDuration(durStr) {
+  if (!durStr) return 0;
+  const parts = durStr.trim().split(':');
+  if (parts.length === 3) return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+  if (parts.length === 2) return parseInt(parts[0]);
+  return parseInt(parts[0]) || 0;
+}
+
 function cachePath(url) {
   return path.join(CACHE_DIR, crypto.createHash('md5').update(url).digest('hex') + '.ts');
 }
@@ -242,6 +250,7 @@ const SITES = {
   vlxx: { base: 'https://vlxx.moi' },
   quatvn: { base: 'https://quatvn.moi' },
   sexbjcam: { base: 'https://sexbjcam.com' },
+  javtrailers: { base: 'https://javtrailers.com' },
 };
 
 function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
@@ -357,6 +366,45 @@ const server = http.createServer(async (req, res) => {
         } else {
           url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
         }
+      } else if (site === 'javtrailers') {
+        if (search) {
+          // Tìm diễn viên qua /casts/{slug}
+          const castSlug = search.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          // Thử 2 thứ tự tên (Nhật: họ trước tên sau)
+          const parts = castSlug.split('-');
+          const slugs = [castSlug];
+          if (parts.length > 1 && parts[1] !== parts[0]) {
+            slugs.push([...parts.slice(1), parts[0]].join('-'));
+          }
+          // Thử từng slug cho tới khi có kết quả
+          for (const slug of slugs) {
+            url = `${HOST}/casts/${slug}`;
+            if (page > 1) url += `?page=${page}`;
+            try {
+              const testHtml = await fetchText(url, HOST + '/');
+              if (testHtml.includes('vid-title')) break;
+            } catch { continue; }
+          }
+        } else if (category) {
+          // Studio slug luôn dùng /studios/{slug}
+          if (['trending','newest'].includes(category)) {
+            url = `${HOST}/videos?category=${category}`;
+            if (page > 1) url += `&page=${page}`;
+          } else {
+            // Thử cast page trước, fallback studio
+            const tryUrl = `${HOST}/casts/${category}` + (page > 1 ? `?page=${page}` : '');
+            let tryHtml;
+            try { tryHtml = await fetchText(tryUrl, HOST + '/'); } catch {}
+            if (tryHtml && tryHtml.includes('vid-title')) {
+              url = tryUrl;
+            } else {
+              url = `${HOST}/studios/${category}`;
+              if (page > 1) url += `?page=${page}`;
+            }
+          }
+        } else {
+          url = page > 1 ? `${HOST}/videos?page=${page}` : `${HOST}/`;
+        }
       } else {
         if (search) {
           url = `${HOST}/search/${encodeURIComponent(search)}/`;
@@ -429,6 +477,27 @@ const server = http.createServer(async (req, res) => {
         videos.push(...parse(html));
         if (videos.length > 500) videos.length = 500;
         categories = [{ slug: 'kbj', name: 'KBJ' }, { slug: 'bj', name: 'BJ' }, { slug: 'webcam', name: 'Webcam' }];
+      } else if (site === 'javtrailers') {
+        const re = /<a\s+href="\/video\/([^"]+)"\s+class="video-link"\s+title="([^"]+)"[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[\s\S]*?duration-badge[^>]*>([^<]+)<\/span>[\s\S]*?<p class="card-text title mb-0 vid-title">[^<]*<\/p>\s*<small[^>]*>([^<]*)<\/small>/g;
+        let m; while ((m = re.exec(html))) {
+          const t = m[2];
+          const dur = parseDuration(m[4]);
+          // Lọc compilation + video dài
+          if (/\b(Best|Collection|Compilation)\b/i.test(t)) continue;
+          if (dur >= 240) continue;
+          videos.push({ title: t, path: '/video/' + m[1], thumbnail: m[3], views: m[5] || 'N/A' });
+        }
+        categories = [{ slug: 'trending', name: 'Xu hướng' }, { slug: 'newest', name: 'Mới nhất' }];
+        // Studio từ dropdown
+        const stuRe = /href="\/studios\/([^"]+)"[^>]*class="dropdown-item"[^>]*>([^<]+)<\/a>/g;
+        let sm; while ((sm = stuRe.exec(html))) {
+          categories.push({ slug: sm[1], name: sm[2].trim() });
+        }
+        // Studio đặc biệt không có trong dropdown
+        const extraStudios = [{ slug: 'das', name: 'DAS' }];
+        for (const es of extraStudios) {
+          if (!categories.find(c => c.slug === es.slug)) categories.push(es);
+        }
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -453,6 +522,13 @@ const server = http.createServer(async (req, res) => {
       if (site === 'sexbjcam') {
         // SexBJCam: phân trang bình thường, fetch theo page yêu cầu
         totalPages = 99; // ước lượng — tự dừng khi hết nội dung
+      } else if (site === 'javtrailers') {
+        // JavTrailers: tìm tất cả page=N trong href
+        const pageRe = /[?&]page=(\d+)/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
+        // Lọc unique + lấy số lớn nhất
+        const unique = [...new Set(pageNums)].sort((a,b) => b - a);
+        totalPages = unique.length ? unique[0] : 1;
       } else if (site === 'vlxx') {
         // VLXX dùng data-page attribute và /new/N/ URL
         const pageRe = /data-page='(\d+)'/g;
@@ -476,7 +552,36 @@ const server = http.createServer(async (req, res) => {
         else if (pageNums.length) totalPages = Math.max(...pageNums);
       }
 
-      return sendJSON(res, { success: true, page: parseInt(page), hasMore: parseInt(page) < totalPages, totalPages, videos, categories });
+      // JavTrailers: thêm studio rows cho trang chủ
+      let studioRows = [];
+      if (site === 'javtrailers' && page >= 1 && !search) {
+        const topStudios = categories.filter(c => !['trending','newest'].includes(c.slug) && !['prestige','sod-create'].includes(c.slug));
+        // Tất cả studio trên trang 1
+        const pageStudios = parseInt(page) === 1 ? topStudios : topStudios.slice(0, 0);
+        if (!pageStudios.length) { studioRows = []; } else {
+        // Fetch song song tất cả studio pages
+        const sParse = (sHtml) => {
+          const svids = [];
+          const sRe = /<a\s+href="\/video\/([^"]+)"\s+class="video-link"\s+title="([^"]+)"[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[\s\S]*?duration-badge[^>]*>([^<]+)<\/span>[\s\S]*?<p class="card-text title mb-0 vid-title">[^<]*<\/p>\s*<small[^>]*>([^<]*)<\/small>/g;
+          let sm; while ((sm = sRe.exec(sHtml)) && svids.length < 40) {
+            if (/\b(Best|Collection|Compilation)\b/i.test(sm[2])) continue;
+            const dur = parseDuration(sm[4]);
+            if (dur >= 240) continue;
+            svids.push({ title: sm[2], path: '/video/' + sm[1], thumbnail: sm[3], views: sm[5] || 'N/A' });
+          }
+          return svids;
+        };
+        const results = await Promise.allSettled(pageStudios.map(st => {
+          const sPage = page > 1 ? `?page=${page}` : '';
+          return fetchText(`${HOST}/studios/${st.slug}${sPage}`, HOST + '/').then(h => ({ studio: st, videos: sParse(h) }));
+        }));
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value.videos.length >= 3) studioRows.push(r.value);
+        }
+        }
+      }
+
+      return sendJSON(res, { success: true, page: parseInt(page), hasMore: parseInt(page) < totalPages, totalPages, videos, categories, studioRows });
 
     // ==================== API: CHI TIẾT VIDEO ====================
     } else if (pathname === '/api/video-detail') {
@@ -600,10 +705,8 @@ const server = http.createServer(async (req, res) => {
       if (site === 'sexbjcam') {
         const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
         if (ifm) {
-          // Thử fetch embed để tìm source
           try {
             const embedHtml = await fetchText(ifm[1], 'https://sexbjcam.com/');
-            // Tìm bất kỳ URL video nào
             const vidUrls = embedHtml.match(/"(https?:\/\/[^"]+\.(?:m3u8|mp4))"/g);
             if (vidUrls && vidUrls.length) {
               streamUrl = vidUrls[0].replace(/"/g, '');
@@ -611,6 +714,31 @@ const server = http.createServer(async (req, res) => {
               console.log(`[SexBJCam] Found stream via embed: ${streamUrl.slice(0, 60)}`);
             }
           } catch {}
+        }
+      }
+
+      // --- JAVTRAILERS ---
+      if (site === 'javtrailers') {
+        // Ưu tiên CDN media.javtrailers.com (dmm.co.jp bị chặn)
+        const jtMatch = html.match(/"(https?:\/\/media\.javtrailers\.com[^"]+playlist\.m3u8[^"]*)"/);
+        const hlsMatch = jtMatch || html.match(/"(https?:\/\/[^"]+playlist\.m3u8[^"]*)"/);
+        if (hlsMatch) {
+          streamUrl = hlsMatch[1];
+          proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=${site}`;
+          console.log(`[JavTrailers] Stream: ${streamUrl.slice(0, 60)}`);
+        }
+        // Cast(s) — diễn viên (ưu tiên trước studio)
+        const castRe = /href="\/casts\/([^"]+)"[^>]*class="badge[^"]*badge-link"[^>]*>([^<]+)</g;
+        let cm; while ((cm = castRe.exec(html))) {
+          const name = cm[2].trim().replace(/\s+[\u3040-\u9FFF\u4E00-\u9FFF].*$/, '').trim();
+          if (name && name.length > 1 && !tags.find(t => t.slug === cm[1])) {
+            tags.push({ slug: cm[1], name, type: 'cast' });
+          }
+        }
+        // Studio
+        const studioM = html.match(/Studio:<\/span><a[^>]*href="\/studios\/([^"]+)"[^>]*>([^<]+)<\/a>/i);
+        if (studioM) {
+          tags.push({ slug: studioM[1], name: studioM[2].trim(), type: 'studio' });
         }
       }
 
@@ -1026,7 +1154,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : 'SexBJCam', base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k, base: v.base }
         ]))
       });
 

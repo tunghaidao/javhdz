@@ -251,6 +251,7 @@ const SITES = {
   quatvn: { base: 'https://quatvn.moi' },
   sexbjcam: { base: 'https://sexbjcam.com' },
   javtrailers: { base: 'https://javtrailers.com' },
+  javtiful: { base: 'https://javtiful.com' },
 };
 
 function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
@@ -405,6 +406,16 @@ const server = http.createServer(async (req, res) => {
         } else {
           url = page > 1 ? `${HOST}/videos?page=${page}` : `${HOST}/`;
         }
+      } else if (site === 'javtiful') {
+        if (search) {
+          url = `${HOST}/zh/videos?search=${encodeURIComponent(search)}`;
+          if (page > 1) url += `&page=${page}`;
+        } else if (category) {
+          url = `${HOST}/zh/videos?category=${category}`;
+          if (page > 1) url += `&page=${page}`;
+        } else {
+          url = page > 1 ? `${HOST}/zh/censored?page=${page}` : `${HOST}/zh/censored`;
+        }
       } else {
         if (search) {
           url = `${HOST}/search/${encodeURIComponent(search)}/`;
@@ -498,6 +509,24 @@ const server = http.createServer(async (req, res) => {
         for (const es of extraStudios) {
           if (!categories.find(c => c.slug === es.slug)) categories.push(es);
         }
+      } else if (site === 'javtiful') {
+        // Phần tử card + title nằm rời nhau trong HTML, dùng index pairing
+        const parseVids = (h) => {
+          const out = [];
+          const thumbs = [...h.matchAll(/<a\s+href="(\/zh\/video\/\d+\/[^"]+)"\s+class="front-video-thumb"[\s\S]*?data-front-lazy-src="([^"]+)"[\s\S]*?class="front-duration-tag"[^>]*>([^<]+)<\/span>/g)];
+          const titles = [...h.matchAll(/<a\s+href="(\/zh\/video\/\d+\/[^"]+)"\s+class="front-video-title"[^>]*>([^<]+)<\/a>/g)];
+          for (let i = 0; i < Math.min(thumbs.length, titles.length); i++) {
+            out.push({
+              title: titles[i][2],
+              path: thumbs[i][1],
+              thumbnail: thumbs[i][2].startsWith('http') ? thumbs[i][2] : 'https://javtiful.com' + thumbs[i][2],
+              views: thumbs[i][3] || 'N/A'
+            });
+          }
+          return out;
+        };
+        videos.length = 0; videos.push(...parseVids(html));
+        categories = [{ slug: 'newest', name: 'Mới nhất' }, { slug: 'trending', name: 'Xu hướng' }];
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -550,6 +579,12 @@ const server = http.createServer(async (req, res) => {
         const filtered = pageNums.filter(n => n > 2);
         if (filtered.length) totalPages = Math.max(...filtered);
         else if (pageNums.length) totalPages = Math.max(...pageNums);
+      }
+      // ====== JAVTIFUL pagination ======
+      if (site === 'javtiful') {
+        // Chỉ hiển thị "Next" (page=N), không có số trang cuối
+        const hasNext = /[?&]page=\d+/g.test(html);
+        totalPages = hasNext ? 99 : 1;
       }
 
       // JavTrailers: thêm studio rows cho trang chủ
@@ -703,6 +738,47 @@ const server = http.createServer(async (req, res) => {
 
       // --- SEXBJCAM ---
       if (site === 'sexbjcam') {
+        const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
+        if (ifm) {
+          try {
+            const embedHtml = await fetchText(ifm[1], 'https://sexbjcam.com/');
+            const vidUrls = embedHtml.match(/"(https?:\/\/[^"]+\.(?:m3u8|mp4))"/g);
+            if (vidUrls && vidUrls.length) {
+              streamUrl = vidUrls[0].replace(/"/g, '');
+              proxiedStreamUrl = streamUrl;
+              console.log(`[SexBJCam] Found stream via embed: ${streamUrl.slice(0, 60)}`);
+            }
+          } catch {}
+        }
+      }
+
+      // --- JAVTIFUL ---
+      if (site === 'javtiful') {
+        try {
+          const { chromium } = require('playwright');
+          const browser = await (async () => {
+            if (global.__pwBrowser) return global.__pwBrowser;
+            const b = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            global.__pwBrowser = b;
+            return b;
+          })();
+          const page = await browser.newPage();
+          await page.goto('https://javtiful.com' + videoPath, { timeout: 15000, waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(2000);
+          const vidSrc = await page.evaluate(() => { const v = document.getElementById('front-player'); return v ? v.src : null; });
+          await page.close();
+          if (vidSrc && vidSrc.startsWith('http')) {
+            streamUrl = vidSrc;
+            proxiedStreamUrl = vidSrc;
+            const titleM = html.match(/property="og:title"[^>]*content="([^"]+)"/);
+            if (titleM) title = titleM[1].replace(/\s*\|.*$/, '').trim();
+            console.log(`[JavTiful] Stream: ${streamUrl.slice(0, 60)}`);
+          }
+        } catch (e) { console.log(`[JavTiful] Error: ${e.message}`); }
+      }
+
+      // --- JAVHDZ ---
+      if (site === 'javhdz') {
         const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
         if (ifm) {
           try {
@@ -1154,7 +1230,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k, base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k, base: v.base }
         ]))
       });
 

@@ -63,6 +63,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return;
     }
+        const recItem = e.target.closest('.rec-item');
+    if (recItem) {
+      const idx = recItem.dataset.idx;
+      if (idx !== undefined && allVideos[idx]) {
+        const v = allVideos[idx];
+        openPlayer(v, v._site || currentSite);
+      }
+      return;
+    }
     const heart = e.target.closest('.card-fav');
     if (heart) {
       e.stopPropagation();
@@ -145,27 +154,30 @@ async function loadVideos() {
   allCategories = data.categories || [];
   allStudioRows = data.studioRows || [];
   totalPages = data.totalPages || Math.max(1, Math.ceil(allVideos.length / 20) + 1);
-  renderHero(allVideos);
   renderCategories(allCategories);
-  renderRows(allVideos);
-}
-
-// ===================== HERO =====================
-function renderHero(videos) {
-  const pick = videos[0];
-  if (!pick) return;
-  document.getElementById('heroBg').style.backgroundImage = `url(${pick.thumbnail})`;
-  document.getElementById('heroTitle').textContent = pick.title.length > 60 ? pick.title.slice(0, 57) + '...' : pick.title;
-  document.getElementById('heroDesc').textContent = 'Luot xem: ' + (pick.views || 'N/A') + ' · ' + currentSite.toUpperCase();
-  document.getElementById('heroPlayBtn').onclick = () => openPlayer(pick);
+  renderGrid(allVideos);
 }
 
 // ===================== CATEGORIES =====================
 function renderCategories(cats) {
-  const scroll = document.getElementById('catScroll');
-  let html = '<button class="cat-btn active" data-slug="">📺 Tat ca</button>';
+  const sidebar = document.getElementById('sidebarCats');
+  let html = '<button class="cat-btn" data-slug="">📺 Tất cả</button>';
   for (const c of cats) html += `<button class="cat-btn" data-slug="${c.slug}">${c.name}</button>`;
-  scroll.innerHTML = html;
+  sidebar.innerHTML = html;
+  // Studio sidebar
+  const studioSec = document.getElementById('sidebarStudios');
+  const studioList = document.getElementById('sidebarStudiosList');
+  if (currentSite === 'javtrailers') {
+    const studios = cats.filter(c => !['trending','newest'].includes(c.slug));
+    if (studios.length) {
+      studioSec.style.display = 'block';
+      studioList.innerHTML = studios.map(c => `<button class="cat-btn" data-slug="${c.slug}">${c.name}</button>`).join('');
+    }
+  } else {
+    studioSec.style.display = 'none';
+  }
+  // Highlight current
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.toggle('active', b.dataset.slug === currentCategory));
 }
 
 function filterCategory(slug) {
@@ -175,45 +187,33 @@ function filterCategory(slug) {
 }
 
 // ===================== ROWS =====================
-function renderRows(videos) {
+function renderGrid(videos) {
   const content = document.getElementById('content');
   if (!videos.length) { content.innerHTML = '<div class="loading-screen"><p style="color:#aaa">Khong co video.</p></div>'; return; }
 
-  let rows;
-  if (currentSite === 'javtrailers' && allStudioRows.length) {
-    rows = [{ title: '🔥 De xuat cho ban', vids: videos.slice(0, 10) }];
-    for (const sr of allStudioRows) {
-      rows.push({ title: '🏢 ' + sr.studio.name, vids: sr.videos, studioSlug: sr.studio.slug });
-      for (const sv of sr.videos) { if (!allVideos.find(v => v.path === sv.path)) allVideos.push(sv); }
-    }
-  } else {
-    rows = [{ title: '🔥 De xuat cho ban', vids: videos.slice(0, 10) }];
-    if (videos.length > 10) rows.push({ title: '📌 Tiep theo', vids: videos.slice(10, 22) });
-    if (videos.length > 22) rows.push({ title: '🎬 Phim moi cap nhat', vids: videos.slice(22, 40) });
-    const remaining = videos.slice(40);
-    if (remaining.length) { for (let i = 0; i < remaining.length; i += 12) rows.push({ title: i === 0 ? '✨ Goi y them' : '📺 Xem them', vids: remaining.slice(i, i + 12) }); }
-  }
-
-  let html = '<div class="rows-container">';
-  for (const row of rows) {
-    html += `<div class="row"><div class="row-header"><h3 class="row-title">${escHtml(row.title)}</h3><span class="row-count">${row.vids.length} video</span></div><div class="row-scroll">`;
-    for (let i = 0; i < row.vids.length; i++) html += renderCard(row.vids[i], allVideos.indexOf(row.vids[i]));
-    if (row.studioSlug) {
-      html += `<div onclick="filterCategory('${row.studioSlug}')" style="flex:0 0 auto;width:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:#999;border-radius:8px;flex-shrink:0">
-        <div style="font-size:24px">→</div>
-        <div style="font-size:11px">Xem thêm</div>
-      </div>`;
-    }
-    html += '</div></div>';
-  }
+  let html = '<div class="video-list">';
+  for (let i = 0; i < videos.length; i++) html += renderCard(videos[i], i);
   html += '</div>';
-
 
   html += `<div class="page-controls"><button class="page-btn" data-delta="-1" ${currentPage <= 1 ? 'disabled' : ''}>◀ Truoc</button><span class="page-info">Trang ${currentPage} / ${totalPages}</span><button class="page-btn" data-delta="1" ${currentPage >= totalPages ? 'disabled' : ''}>Sau ▶</button></div>`;
   content.innerHTML = html;
-}
 
-function renderCard(v, idx) {
+  // Populate right sidebar with first few videos as suggestions
+  const sidebarRec = document.getElementById('sidebarRec');
+  let recHtml = '';
+  const maxRec = Math.min(15, videos.length);
+  for (let i = 0; i < maxRec; i++) {
+    const v = videos[i];
+    recHtml += `<div class="rec-item" data-idx="${i}">
+      <img class="rec-thumb" src="${v.thumbnail || ''}" alt="" loading="lazy" onerror="this.style.background='#222'">
+      <div class="rec-info">
+        <div class="rec-title">${escHtml(v.title || '')}</div>
+        <div class="rec-views">👁 ${escHtml(v.views || 'N/A')}</div>
+      </div>
+    </div>`;
+  }
+  sidebarRec.innerHTML = recHtml;
+}function renderCard(v, idx) {
   const thumb = v.thumbnail || '';
   const title = v.title || 'Khong co tieu de';
   const views = v.views || 'N/A';
@@ -344,7 +344,7 @@ async function openPlayer(video, optSite) {
     cmdRow.innerHTML = `<div style="font-size:11px;color:#666;margin-bottom:4px">📋 yt-dlp <span style="color:#444">(đã copy vào clipboard)</span></div>
       <pre style="background:#0d0d0d;color:#0f0;padding:6px 10px;border-radius:4px;font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer;margin:0" 
         onclick="navigator.clipboard.writeText(this.textContent);this.style.color='#fff';setTimeout(()=>this.style.color='#0f0',1000)">${escHtml(cmd)}</pre>`;
-    document.getElementById('playerActions').insertAdjacentElement('afterend', cmdRow);
+    document.getElementById('playerDesc').parentNode.insertBefore(cmdRow, document.getElementById('playerRec'));
   }
 
   // Recommended videos theo tag đầu tiên

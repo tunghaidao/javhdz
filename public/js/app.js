@@ -53,6 +53,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Event delegation
   document.addEventListener('click', e => {
+    const heart = e.target.closest('.card-fav');
+    if (heart) {
+      e.stopPropagation();
+      const idx = heart.dataset.idx;
+      if (idx !== undefined && allVideos[idx]) toggleFavorite(allVideos[idx]);
+      return;
+    }
     const card = e.target.closest('.card');
     if (card) {
       const idx = card.dataset.idx;
@@ -70,13 +77,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const v = allVideos[idx];
         openPlayer(v, v._site || currentSite);
       }
-      return;
-    }
-    const heart = e.target.closest('.card-fav');
-    if (heart) {
-      e.stopPropagation();
-      const idx = heart.dataset.idx;
-      if (idx !== undefined && allVideos[idx]) toggleFavorite(allVideos[idx]);
       return;
     }
     const catBtn = e.target.closest('.cat-btn');
@@ -217,11 +217,42 @@ function renderGrid(videos) {
   const thumb = v.thumbnail || '';
   const title = v.title || 'Khong co tieu de';
   const views = v.views || 'N/A';
+  const code = v.code || '';
   const faved = isFavorite(v);
-  return `<div class="card" data-idx="${idx}"><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}</div></div><div class="card-overlay"><span class="card-play">▶</span><span class="card-fav ${faved ? 'faved' : ''}" data-idx="${idx}" style="position:absolute;top:8px;right:8px;font-size:20px;cursor:pointer;text-shadow:0 1px 4px rgba(0,0,0,.8)">${faved ? '♥' : '♡'}</span></div></div>`;
+  return `<div class="card" data-idx="${idx}"><span class="card-fav ${faved ? 'faved' : ''}" data-idx="${idx}" style="position:absolute;z-index:5;top:6px;right:6px;font-size:22px;cursor:pointer;text-shadow:0 1px 6px rgba(0,0,0,.9);color:${faved ? '#e50914' : 'rgba(255,255,255,.85)'};transition:transform .15s" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'">${faved ? '♥' : '♡'}</span><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}${code ? ' · <a href="https://sukebei.nyaa.si/?f=0&c=0_0&q=' + encodeURIComponent(code) + '" target="_blank" style="color:#e50914;font-weight:600;text-decoration:none" onclick="event.stopPropagation()">' + escHtml(code) + '</a>' : ''}</div></div></div>`;
 }
 
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+async function sukebeiSearch(code) {
+  if (!code) return;
+  const btn = event?.target;
+  if (btn) { btn.textContent = '⏳'; }
+  try {
+    const r = await fetch('/api/sukebei-search?code=' + encodeURIComponent(code));
+    const d = await r.json();
+    if (d.success && d.magnet) {
+      // Copy magnet + mở tab
+      if (navigator.clipboard) navigator.clipboard.writeText(d.magnet).catch(() => {});
+      window.open('https://sukebei.nyaa.si/?f=0&c=0_0&q=' + encodeURIComponent(code), '_blank');
+      // Show popup
+      const old = document.getElementById('sukebeiPopup');
+      if (old) old.remove();
+      const div = document.createElement('div');
+      div.id = 'sukebeiPopup';
+      div.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:999;background:#1a1a1a;padding:16px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.6);max-width:400px';
+      div.innerHTML = '<div style="font-size:13px;color:#0f0;margin-bottom:8px">✅ Torrent: ' + d.seeders + ' seeders</div>' +
+        '<div style="font-size:11px;color:#888;margin-bottom:8px">Magnet đã copy. Mở tab Brave > PikPak extension sẽ bắt.</div>' +
+        '<a href="' + d.magnet + '" target="_blank" style="display:inline-block;background:#e50914;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px">📥 Mở magnet</a>' +
+        '<button onclick="this.parentElement.remove()" style="margin-left:8px;background:var(--surface2);color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">✕</button>';
+      document.body.appendChild(div);
+      setTimeout(() => { const p = document.getElementById('sukebeiPopup'); if (p) p.remove(); }, 15000);
+    } else {
+      alert('❌ ' + (d.error || 'Không tìm thấy'));
+    }
+  } catch(e) { alert('Lỗi: ' + e.message); }
+  if (btn) { setTimeout(() => { btn.textContent = code; }, 1000); }
+}
 
 function parseDuration(durStr) {
   if (!durStr) return 0;
@@ -315,23 +346,39 @@ async function openPlayer(video, optSite) {
   };
   document.getElementById('playerTitle').parentNode.insertBefore(heartBtn, document.getElementById('playerTitle'));
   document.getElementById('playerTags').innerHTML = (detail.tags || []).slice(0, 10).map(t => `<span class="player-tag" data-slug="${escHtml(t.slug)}" data-type="${t.type || ''}">${escHtml(t.name)}</span>`).join('');
+  // Torrent tự động
+  const existingT = document.getElementById('torrentInfo');
+  if (existingT) existingT.remove();
+  if (detail.torrent && detail.torrent.magnet) {
+    const tDiv = document.createElement('div');
+    tDiv.id = 'torrentInfo';
+    tDiv.style.cssText = 'margin:0 20px 8px;padding:8px 12px;background:#1a2a1a;border-radius:8px;display:flex;align-items:center;gap:10px;font-size:12px';
+    tDiv.innerHTML = '<span>🟢 Torrent sẵn (' + detail.torrent.seeders + ' seeders)</span>' +
+      '<a href="' + detail.torrent.magnet + '" target="_blank" style="margin-left:auto;background:#e50914;color:#fff;padding:4px 12px;border-radius:6px;text-decoration:none;font-size:11px;font-weight:600">⬇ Magnet</a>';
+    document.getElementById('playerTags').parentNode.insertAdjacentElement('afterend', tDiv);
+  }
   document.getElementById('playerDesc').innerHTML = detail.description ? `<p>${detail.description}</p>` : '';
 
   // Download yt-dlp command
   const streamUrl = detail.streamUrl || '';
-  document.getElementById('playerActions').innerHTML = '';
+  document.getElementById('playerActions').innerHTML = streamUrl ? '<a href="/api/download-cached?pl=' + encodeURIComponent(streamUrl) + '&s=' + site + '" class="btn-secondary" style="font-size:12px;padding:4px 12px;text-decoration:none;color:#fff;background:var(--surface2);border-radius:6px">⬇ Cache</a><button class="btn-secondary" onclick="nextRandom()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🎲 Tiếp</button><button class="btn-secondary" onclick="clearVideoCache()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🗑 Cache</button><button class="btn-secondary" onclick="showClipDialog()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">✂ Cắt</button>' : '';
   // Xoá command cũ nếu có
   const oldCmd = document.querySelector('.dl-cmd-row');
   if (oldCmd) oldCmd.remove();
 
+  window._lastStreamUrl = streamUrl;
+  window._lastVideoPath = video.path || '';
+  window._lastSite = site;
   if (streamUrl) {
-    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com' };
+    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com' };
     const host = hostMap[site] || 'javhdz.ws';
-    // Dùng proxy URL (qua server) thay vì CDN gốc — tránh Cloudflare
-    const proxyUrl = detail.proxiedStreamUrl || streamUrl;
-    const fullUrl = proxyUrl.startsWith('http') ? proxyUrl : 'http://localhost:3000' + proxyUrl;
+    // Dùng stream URL gốc (CDN) thay vì proxy — yt-dlp xử lý Cloudflare tốt
+    const baseUrl = window.location.origin;
+    const fullUrl = detail.proxiedStreamUrl ? baseUrl + detail.proxiedStreamUrl : streamUrl;
     const safeTitle = (detail.title || video.title || 'video').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 100);
-    const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${host}/" -o "${safeTitle}.%(ext)s" --force-overwrites '${fullUrl}'`;
+    const safeUrl = fullUrl.replace(/'/g, "'\\''");
+    const cmd = `yt-dlp --referer "https://${host}/" -o "${safeTitle}.%(ext)s" --force-overwrites '${safeUrl}'`;
+    const dlUrl = `/api/download-cached?pl=${encodeURIComponent(streamUrl)}&s=${site}`;
 
     // Tự copy vào clipboard
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -431,7 +478,7 @@ function loadVideoSource(url, site, path, playerWrap) {
     if (url.includes('.mp4') || url.includes('?format=mp4') || url.includes('.m4v')) {
       videoEl.src = url; playVideo(); return;
     }
-    const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backbufferLength: 30, maxBufferLength: 30, startLevel: -1 });
+    const hls = new Hls({ enableWorker: true, lowLatencyMode: false, backbufferLength: 300, maxBufferLength: 600, maxMaxBufferLength: 1200, startLevel: -1, maxBufferSize: 500 * 1000 * 1000 });
     currentHls = hls;
     hls.loadSource(url);
     hls.attachMedia(videoEl);
@@ -470,7 +517,61 @@ function switchPart(el) {
   loadVideoSource(url, currentSite, currentVideoPath, document.getElementById('playerWrap'));
 }
 
-function closePlayer() {
+function showClipDialog() {
+  const currentStreamUrl = document.querySelector('.dl-cmd-row pre')?.textContent?.match(/'([^']+)'/)?.[1] || '';
+  const video = document.getElementById('videoPlayer');
+  const now = video ? Math.floor(video.currentTime) : 0;
+  const h = String(Math.floor(now / 3600)).padStart(2, '0');
+  const m = String(Math.floor((now % 3600) / 60)).padStart(2, '0');
+  const s = String(now % 60).padStart(2, '0');
+  const startStr = h + ':' + m + ':' + s;
+
+  // Remove old dialog
+  const old = document.getElementById('clipDialog');
+  if (old) old.remove();
+
+  const div = document.createElement('div');
+  div.id = 'clipDialog';
+  div.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;padding:20px;border-radius:12px;z-index:300;width:320px;box-shadow:0 8px 40px rgba(0,0,0,.6)';
+  div.innerHTML = `<div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:12px">✂ Cắt video</div>
+    <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Bắt đầu (HH:MM:SS)</label>
+    <input id="clipStart" value="${startStr}" style="width:100%;background:#0d0d0d;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:6px;margin-bottom:10px;font-size:13px">
+    <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Thời lượng (giây)</label>
+    <input id="clipDur" value="30" style="width:100%;background:#0d0d0d;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:6px;margin-bottom:14px;font-size:13px">
+    <div style="display:flex;gap:8px">
+      <button onclick="doClip()" style="flex:1;background:#e50914;color:#fff;border:none;padding:8px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">✂ Cắt</button>
+      <button onclick="this.closest('#clipDialog').remove()" style="flex:1;background:var(--surface2);color:#fff;border:none;padding:8px;border-radius:6px;cursor:pointer;font-size:13px">Hủy</button>
+    </div>
+    <div id="clipResult" style="margin-top:10px;font-size:12px;color:#0f0;display:none"></div>`;
+  document.querySelector('.player-container').appendChild(div);
+}
+
+async function doClip() {
+  const start = document.getElementById('clipStart')?.value || '00:00:00';
+  const dur = document.getElementById('clipDur')?.value || '30';
+  // Get stream URL from current context
+  const streamUrl = window._lastStreamUrl || '';
+  const site = window._lastSite || '';
+  if (!streamUrl) { alert('Không tìm thấy URL video'); return; }
+  const btn = document.querySelector('#clipDialog button');
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  const resultDiv = document.getElementById('clipResult');
+  try {
+    const r = await fetch('/api/clip?pl=' + encodeURIComponent(streamUrl) + '&s=' + site + '&start=' + encodeURIComponent(start) + '&dur=' + encodeURIComponent(dur));
+    const d = await r.json();
+    if (d.success && resultDiv) {
+      resultDiv.style.display = 'block';
+      resultDiv.innerHTML = '✅ Xong! <a href="' + d.url + '" target="_blank" style="color:#0f0">Mở clip</a>';
+    } else if (resultDiv) {
+      resultDiv.style.display = 'block';
+      resultDiv.innerHTML = '❌ ' + (d.error || 'Lỗi');
+    }
+  } catch(e) {
+    if (resultDiv) { resultDiv.style.display = 'block'; resultDiv.innerHTML = '❌ ' + e.message; }
+  }
+  if (btn) { btn.textContent = '✂ Cắt'; btn.disabled = false; }
+}
+ {
   if (currentHls) { try { currentHls.destroy(); } catch {} currentHls = null; }
   const overlay = document.getElementById('playerOverlay');
   const player = document.getElementById('videoPlayer');
@@ -499,6 +600,81 @@ function filterByTag(slug, type) {
     document.getElementById('searchInput').value = '';
   }
   loadVideos();
+}
+
+async function clearVideoCache() {
+  const pl = window._lastStreamUrl;
+  if (!pl) return;
+  const btn = document.activeElement;
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/clear-cache?pl=' + encodeURIComponent(pl));
+    const d = await r.json();
+    if (d.success) {
+      alert('✅ Đã xoá ' + d.deleted + ' segment (' + (d.freed/1e6).toFixed(1) + 'MB)');
+    } else {
+      alert('❌ ' + (d.error || 'Lỗi'));
+    }
+  } catch(e) { alert('❌ ' + e.message); }
+  if (btn) { btn.textContent = '🗑 Cache'; btn.disabled = false; }
+}
+
+function nextRandom() {
+  if (!allVideos.length) return;
+  // Loại bỏ video hiện tại
+  const currentPath = window._lastVideoPath || '';
+  const others = allVideos.filter(v => v.path !== currentPath);
+  if (!others.length) return;
+  const pick = others[Math.floor(Math.random() * others.length)];
+  if (pick) openPlayer(pick, pick._site || currentSite);
+}
+
+function playRandomVideo() {
+  if (!allVideos.length) return;
+  const pick = allVideos[Math.floor(Math.random() * allVideos.length)];
+  if (pick) openPlayer(pick, pick._site || currentSite);
+}
+
+function closePlayer() {
+  if (currentHls) { try { currentHls.destroy(); } catch {} currentHls = null; }
+  const overlay = document.getElementById('playerOverlay');
+  const player = document.getElementById('videoPlayer');
+  if (player) { player.pause(); player.removeAttribute('src'); player.load(); player.remove(); }
+  const iframe = document.querySelector('#playerWrap iframe');
+  if (iframe) { iframe.src = ''; iframe.remove(); }
+  document.getElementById('playerWrap').innerHTML = '';
+  overlay.classList.remove('open');
+}
+
+function startAutoPlay() {
+  if (autoPlayActive) {
+    autoPlayActive = false;
+    if (autoPlayTimer) { clearTimeout(autoPlayTimer); autoPlayTimer = null; }
+    const btn = document.getElementById('autoPlayBtn');
+    if (btn) { btn.textContent = '🎲 Tự động'; btn.style.background = 'var(--surface2)'; }
+    return;
+  }
+  autoPlayActive = true;
+  const btn = document.getElementById('autoPlayBtn');
+  if (btn) { btn.textContent = '⏹ Dừng'; btn.style.background = '#e50914'; }
+  playRandomFromList();
+}
+
+function playRandomFromList() {
+  if (!autoPlayActive) return;
+  if (!allVideos.length) { autoPlayActive = false; const b = document.getElementById('autoPlayBtn'); if (b) b.textContent = '🎲 Tự động'; return; }
+  const pick = allVideos[Math.floor(Math.random() * allVideos.length)];
+  if (pick) openPlayer(pick, pick._site || currentSite);
+  if (autoPlayTimer) { clearTimeout(autoPlayTimer); }
+  autoPlayTimer = setTimeout(() => {
+    if (!autoPlayActive) return;
+    const video = document.getElementById('videoPlayer');
+    if (video && video.duration && video.currentTime > 0 && video.currentTime >= video.duration - 2) {
+      setTimeout(playRandomFromList, 1500);
+    } else if (autoPlayActive) {
+      autoPlayTimer = setTimeout(playRandomFromList, 5000);
+    }
+  }, 5000);
 }
 
 function downloadCached(encodedUrl) {

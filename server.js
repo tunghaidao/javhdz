@@ -198,10 +198,14 @@ async function fetchAndCacheSegment(url, host) {
   const p = (async () => {
     try {
       const buf = await fetchBuffer(url, host + '/');
-      cacheSet(url, buf);
-      return buf;
-    } catch { return null; }
-    finally { fetchPromises.delete(url); }
+      if (buf && buf.length > 100) { cacheSet(url, buf); fetchPromises.delete(url); return buf; }
+    } catch {}
+    try {
+      const { execSync } = require('child_process');
+      const buf = execSync("curl -sfL -A 'Mozilla/5.0' --max-time 20 '" + url.replace(/'/g, "'\\''") + "'", { encoding: 'buffer', timeout: 25000 });
+      if (buf && buf.length > 100) { cacheSet(url, buf); }
+    } catch {}
+    fetchPromises.delete(url);
   })();
   fetchPromises.set(url, p);
   return p;
@@ -530,11 +534,11 @@ const server = http.createServer(async (req, res) => {
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
-          videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: m[4] });
+          const cd1 = m[1].match(/([A-Z]{2,6}-\d+)/); videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: m[4], code: cd1 ? cd1[1] : '' });
         }
         if (!videos.length) {
           const re2 = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"/g;
-          while ((m = re2.exec(html))) videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: 'N/A' });
+          while ((m = re2.exec(html))) { const cd2 = m[1].match(/([A-Z]{2,6}-\d+)/); videos.push({ title: m[1], path: m[2], thumbnail: m[3].startsWith('http') ? m[3] : `${HOST}${m[3]}`, views: 'N/A', code: cd2 ? cd2[1] : '' }); }
         }
         const cr = /<li class="menu-item"><a href="\/category\/([^"]+)\/">([^<]+)<\/a><\/li>/g;
         while ((m = cr.exec(html))) categories.push({ slug: m[1], name: m[2] });
@@ -858,9 +862,33 @@ const server = http.createServer(async (req, res) => {
         servers.push({ id: 1, name: 'Server 1' });
       }
 
+      // Tự động search sukebei cho javhdz
+      let torrent = null;
+      const codeFromParam = parsed.searchParams.get('code');
+      const codeMatch = codeFromParam || title.match(/([A-Z]{2,6}-\d+)/);
+      if (site === 'javhdz' && codeMatch) {
+          try {
+            const { execSync } = require('child_process');
+            const res2 = execSync('node ' + path.join(__dirname, '.local', 'bin', 'sukebei-search.js').replace(/'/g, "'\\''") + " '" + codeMatch[1].replace(/'/g, "'\\''") + "'", { timeout: 15000, encoding: 'utf8' });
+            const parts = res2.trim().split(':');
+            if (parts[0] === 'SUCCESS' && parts[2]) {
+              torrent = { magnet: parts[2], seeders: parts[1] };
+              console.log(`[SUKEBEI] ${codeMatch[1]}: ${parts[1]} seeders`);
+              // Tự động thêm vào PikPak
+              try {
+                const addResult = execSync('node ' + path.join(__dirname, '.local', 'bin', 'pikpak-add.js').replace(/'/g, "'\\''") + " '" + parts[2].replace(/'/g, "'\\''") + "'", { timeout: 15000, encoding: 'utf8' });
+                console.log(`[PIKPAK] ${addResult.trim()}`);
+              } catch (e) {
+                console.log(`[PIKPAK] Error: ${e.message}`);
+              }
+            }
+          } catch {}
+        }
+
       const result = {
         success: true, videoId, title, description, thumbnail, tags, servers,
-        streamUrl, proxiedStreamUrl, vttUrl, proxiedVtt, playlist: quatvnPlaylist
+        streamUrl, proxiedStreamUrl, vttUrl, proxiedVtt, playlist: quatvnPlaylist,
+        torrent
       };
 
       // Lưu cache
@@ -1120,6 +1148,22 @@ const server = http.createServer(async (req, res) => {
         if (!res.headersSent) { res.writeHead(500); res.end('Download failed: ' + e.message); }
       }
 
+    // ==================== API: SUKEBEI SEARCH ====================
+    } else if (pathname === '/api/sukebei-search') {
+      const code = parsed.searchParams.get('code');
+      if (!code) return sendJSON(res, { success: false, error: 'Missing code' }, 400);
+      try {
+        const { execSync } = require('child_process');
+        const result = execSync('node ' + path.join(__dirname, '.local', 'bin', 'sukebei-search.js').replace(/'/g, "'\\''") + " '" + code.replace(/'/g, "'\\''") + "'", { timeout: 15000, encoding: 'utf8' });
+        const parts = result.trim().split(':');
+        if (parts[0] === 'SUCCESS' && parts[2]) {
+          return sendJSON(res, { success: true, seeders: parts[1], magnet: parts[2] });
+        }
+        return sendJSON(res, { success: false, error: parts[1] || 'No results' });
+      } catch (e) {
+        return sendJSON(res, { success: false, error: e.message }, 500);
+      }
+
     // ==================== PROXY: PLAYLIST M3U8 ====================
     } else if (pathname === '/api/proxy/pl.m3u8') {
       const targetUrl = parsed.searchParams.get('url');
@@ -1157,12 +1201,31 @@ const server = http.createServer(async (req, res) => {
       const targetUrl = parsed.searchParams.get('url');
       if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
       const plUrl = parsed.searchParams.get('pl');
+      const site = parsed.searchParams.get('s');
+      const host = site ? getHost(site) : HOST;
       let buf = cacheGet(targetUrl);
       const hit = !!buf;
-      if (!buf) { buf = await fetchAndCacheSegment(targetUrl, HOST); if (!buf) { res.writeHead(502); return res.end('Fetch failed'); } }
+      if (!buf) { buf = await fetchAndCacheSegment(targetUrl, host); if (!buf) { res.writeHead(502); return res.end('Fetch failed'); } }
       res.writeHead(200, { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' });
       res.end(buf);
-      if (hit && plUrl) getPlaylistSegments(plUrl, HOST).then(u => { const i = u.indexOf(targetUrl); if (i !== -1) prefetchToEnd(u, i, HOST, plUrl); }).catch(() => {});
+      if (hit && plUrl) getPlaylistSegments(plUrl, host).then(u => { const i = u.indexOf(targetUrl); if (i !== -1) prefetchToEnd(u, i, host, plUrl); }).catch(() => {});
+
+    // ==================== API: XÓA CACHE THEO PLAYLIST ====================
+    } else if (pathname === '/api/clear-cache') {
+      const plUrl = parsed.searchParams.get('pl');
+      if (!plUrl) return sendJSON(res, { success: false, error: 'Missing pl' }, 400);
+      try {
+        const segs = await getPlaylistSegments(plUrl, HOST);
+        let deleted = 0, freed = 0;
+        for (const u of segs) {
+          const cp = cachePath(u);
+          try { const s = fs.statSync(cp); freed += s.size; fs.unlinkSync(cp); deleted++; } catch {}
+        }
+        console.log('[CLEAR] Deleted ' + deleted + '/' + segs.length + ' segments, freed ' + (freed/1e6).toFixed(1) + 'MB');
+        return sendJSON(res, { success: true, deleted, total: segs.length, freed });
+      } catch (e) {
+        return sendJSON(res, { success: false, error: e.message }, 500);
+      }
 
     // ==================== PROXY: VTT ====================
     } else if (pathname === '/api/proxy/vtt') {
@@ -1261,7 +1324,7 @@ setInterval(() => {
   } catch {}
 }, 30 * 60 * 1000);
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log('╔═══════════════════════════════════════════╗');
   console.log('║     Netflix-Style Proxy Server 🎬         ║');
   console.log(`║     Local: http://localhost:${PORT}          ║`);

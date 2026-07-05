@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NetFlix Multi-Proxy</title>
-  <link rel="stylesheet" href="/css/style.css?v=7">
+  <link rel="stylesheet" href="/css/style.css?v=8">
   <link href="https://fonts.googleapis.com" rel="preconnect">
   <link href="https://fonts.gstatic.com" rel="preconnect" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -28,6 +28,7 @@
             <input type="text" id="searchInput" placeholder="Tìm kiếm...">
             <button onclick="doSearch()">🔍</button>
           </div>
+          <button id="autoPlayBtn" onclick="playRandomVideo()" style="background:var(--surface2);color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap">🎲 Random</button>
           <button class="menu-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')">☰</button>
         </div>
       </div>
@@ -81,6 +82,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script src="/js/app.js?v=7"></script>
+  <script src="/js/app.js?v=27"></script>
 </body>
 </html>

@@ -299,6 +299,7 @@ function prefetchToEnd(allUrls, idx, host, plUrl) {
 const SITES = {
   javhdz: { base: 'https://javhdz.ws' },
   vlxx: { base: 'https://vlxx.moi' },
+  quatvn: { base: 'https://quatvn.mom' },
   sexbjcam: { base: 'https://sexbjcam.com' },
   javtrailers: { base: 'https://javtrailers.com' },
   javtiful: { base: 'https://javtiful.com' },
@@ -514,15 +515,17 @@ const server = http.createServer(async (req, res) => {
           { slug: 'xvideos', name: 'XVIDEOS' }, { slug: 'xnxx', name: 'XNXX' }
         ];
       } else if (site === 'quatvn') {
-        const re = /<article[\s\S]*?<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?(?:<span class="entry-views[^"]*">\s*<strong>([^<]+)<\/strong>)?/g;
+        // QuatVN.mom: g1-mega entry-title headings + g1-frame thumbnails
+        const re = /<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+\.(?:webp|jpg|png))"[^>]*>/g;
         let m; while ((m = re.exec(html))) {
           let p = ''; try { p = m[1].startsWith('http') ? new URL(m[1]).pathname : m[1]; } catch { p = m[1]; }
-          videos.push({ title: m[2].replace(/<[^>]+>/g, '').trim(), path: p, thumbnail: m[3], views: m[4] || 'N/A' });
+          videos.push({ title: m[2].replace(/<[^>]+>/g, '').trim(), path: p, thumbnail: m[3], views: 'N/A' });
         }
         categories = [
           { slug: 'phim-sex-vn', name: 'Việt Nam' }, { slug: 'phim-sex-trung-quoc', name: 'Trung Quốc' },
           { slug: 'phim-sex-han-quoc', name: 'Hàn Quốc' }, { slug: 'phim-sex-us', name: 'US-UK' },
-          { slug: 'phim-sex-thai-lan', name: 'Thái Lan' }, { slug: 'phim-sex-nhat-ban', name: 'Nhật Bản' }
+          { slug: 'phim-sex-thai-lan', name: 'Thái Lan' }, { slug: 'phim-sex-nhat-ban', name: 'Nhật Bản' },
+          { slug: 'phim-sex-malaysia', name: 'Malaysia' }
         ];
       } else if (site === 'sexbjcam') {
         const blocked = ['jinricp', 'mscrew33'];

@@ -487,12 +487,13 @@ async function openPlayer(video, optSite) {
   const hlsUrl = detail.proxiedStreamUrl || detail.streamUrl;
   if (!hlsUrl) {
     if (site === 'sexbjcam') {
-      // Mở trang gốc trong iframe — cách duy nhất để xem Stripchat embed
       playerWrap.innerHTML = `<iframe src="https://sexbjcam.com${video.path}" style="width:100%;height:100%;position:absolute;top:0;left:0;border:none" allowfullscreen></iframe>`;
       const badge = document.createElement('span');
       badge.style.cssText = 'position:absolute;top:8px;right:8px;z-index:10;background:rgba(0,0,0,.7);color:#e50914;font-size:11px;font-weight:600;padding:3px 8px;border-radius:4px';
       badge.textContent = 'EMBED';
       playerWrap.appendChild(badge);
+    } else if (site === '18tube') {
+      playerWrap.innerHTML = `<div style="text-align:center;padding:60px 20px"><p style="color:#e50914;font-size:16px;font-weight:600;margin-bottom:12px">18Tube - Creator Directory</p><p style="color:#999;font-size:13px;margin-bottom:20px">${escHtml(detail.title || video.title)}</p><a href="${escHtml(detail.streamUrl || '')}" target="_blank" style="display:inline-block;background:#e50914;color:#fff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:600">Mở trang creator</a></div>`;
     } else {
       playerWrap.innerHTML = '<div class="loading-screen"><p style="color:#aaa">Khong tim thay nguon phat.</p></div>';
     }

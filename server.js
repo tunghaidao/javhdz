@@ -303,6 +303,7 @@ const SITES = {
   sexbjcam: { base: 'https://sexbjcam.com' },
   javtrailers: { base: 'https://javtrailers.com' },
   javtiful: { base: 'https://javtiful.com' },
+  '18tube': { base: 'https://18tube.my' },
 };
 
 function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
@@ -464,6 +465,13 @@ const server = http.createServer(async (req, res) => {
         } else {
           url = page > 1 ? `${HOST}/videos?page=${page}` : `${HOST}/`;
         }
+      } else if (site === '18tube') {
+        if (search) {
+          url = `${HOST}/?s=${encodeURIComponent(search)}`;
+          if (page > 1) url += `&page=${page}`;
+        } else {
+          url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
+        }
       } else if (site === 'javtiful') {
         if (parsed.searchParams.get('url')) {
           url = parsed.searchParams.get('url');
@@ -611,6 +619,27 @@ const server = http.createServer(async (req, res) => {
         };
         videos.length = 0; videos.push(...parseVids(javHtml));
         categories = [{ slug: 'newest', name: 'Mới nhất' }, { slug: 'trending', name: 'Xu hướng' }, { slug: 'feed', name: '📺 Feed' }];
+      } else if (site === '18tube') {
+        const parseCards = (h) => {
+          const out = [];
+          const cards = [...h.matchAll(/<article[^>]*class="[^"]*post-item[^"]*creator-card[^"]*"[^>]*data-post-id="(\d+)"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[\s\S]*?<img[^>]*class="avatar-image"[^>]*src="([^"]+)"[\s\S]*?<h3[^>]*class="[^"]*post-card-title[^"]*"[^>]*>([\s\S]*?)<\/h3>[\s\S]*?<span class="username">([^<]*)<\/span>[\s\S]*?<span class="views">([\s\S]*?)<\/span>/g)];
+          for (const m of cards) {
+            out.push({
+              title: (m[5] || '').trim(),
+              path: m[2].replace('https://18tube.my', ''),
+              thumbnail: m[4],
+              views: (m[7] || '').replace(/<[^>]+>/g, '').trim()
+            });
+          }
+          return out;
+        };
+        videos.push(...parseCards(html));
+        if (videos.length > 50) videos.length = 50;
+        categories = [
+          { slug: 'creators/onlyfans', name: 'OnlyFans' },
+          { slug: 'creators/fansly', name: 'Fansly' },
+          { slug: 'creators/instagram', name: 'Instagram' }
+        ];
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -666,8 +695,13 @@ const server = http.createServer(async (req, res) => {
       }
       // ====== JAVTIFUL pagination ======
       if (site === 'javtiful') {
-        // Chỉ hiển thị "Next" (page=N), không có số trang cuối
         const hasNext = /[?&]page=\d+/g.test(html);
+        totalPages = hasNext ? 99 : 1;
+      }
+
+      // 18Tube pagination
+      if (site === '18tube') {
+        const hasNext = /class="next[^"]*"/i.test(html) || /rel="next"/i.test(html);
         totalPages = hasNext ? 99 : 1;
       }
 
@@ -956,6 +990,21 @@ const server = http.createServer(async (req, res) => {
         if (streamUrl) {
           proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=${site}`;
         }
+      }
+
+      // --- 18TUBE (creator directory, no stream) ---
+      if (site === '18tube') {
+        const nameM = html.match(/<h1[^>]*class="creator-name"[^>]*>([\s\S]*?)<\/h1>/);
+        const descM = html.match(/<div[^>]*class="creator-description"[^>]*>([\s\S]*?)<\/div>/);
+        if (nameM) title = nameM[1].replace(/<[^>]+>/g, '').trim();
+        if (descM) description = descM[1].replace(/<[^>]+>/g, '').trim();
+        if (!thumbnail) {
+          const tm = html.match(/<img[^>]*class="creator-avatar"[^>]*src="([^"]+)"/);
+          if (tm) thumbnail = tm[1];
+        }
+        // Trả về URL gốc để mở trong tab mới
+        streamUrl = url;
+        proxiedStreamUrl = null;
       }
 
       // VTT thumbnails
@@ -1614,7 +1663,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k, base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k === '18tube' ? '18Tube' : k, base: v.base }
         ]))
       });
 

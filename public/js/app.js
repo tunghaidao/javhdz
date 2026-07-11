@@ -156,6 +156,23 @@ async function loadVideos() {
   totalPages = data.totalPages || Math.max(1, Math.ceil(allVideos.length / 20) + 1);
   renderCategories(allCategories);
   renderGrid(allVideos);
+  // Fetch JAV codes cho javhdz (không có code trong listing)
+  if (currentSite === 'javhdz') {
+    const paths = allVideos.filter(v => !v.code).map(v => v.path).slice(0, 50);
+    if (paths.length) {
+      fetch(`/api/batch-codes?paths=${paths.map(encodeURIComponent).join(',')}`).then(r => r.json()).then(codes => {
+        document.querySelectorAll('.card').forEach(card => {
+          const idx = parseInt(card.dataset.idx);
+          const v = allVideos[idx];
+          if (v && codes[v.path]) {
+            v.code = codes[v.path];
+            const badge = card.querySelector('.card-code');
+            if (badge) badge.textContent = codes[v.path];
+          }
+        });
+      }).catch(() => {});
+    }
+  }
 }
 
 // ===================== CATEGORIES =====================
@@ -219,7 +236,8 @@ function renderGrid(videos) {
   const views = v.views || 'N/A';
   const code = v.code || '';
   const faved = isFavorite(v);
-  return `<div class="card" data-idx="${idx}"><span class="card-fav ${faved ? 'faved' : ''}" data-idx="${idx}" style="position:absolute;z-index:5;top:6px;right:6px;font-size:22px;cursor:pointer;text-shadow:0 1px 6px rgba(0,0,0,.9);color:${faved ? '#e50914' : 'rgba(255,255,255,.85)'};transition:transform .15s" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'">${faved ? '♥' : '♡'}</span><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}${code ? ' · <a href="https://sukebei.nyaa.si/?f=0&c=0_0&q=' + encodeURIComponent(code) + '" target="_blank" style="color:#e50914;font-weight:600;text-decoration:none" onclick="event.stopPropagation()">' + escHtml(code) + '</a>' : ''}</div></div></div>`;
+  const codeBadge = code ? `<span class="card-code">${escHtml(code)}</span>` : '';
+  return `<div class="card" data-idx="${idx}">${codeBadge}<span class="card-fav ${faved ? 'faved' : ''}" data-idx="${idx}" style="position:absolute;z-index:5;top:6px;right:6px;font-size:22px;cursor:pointer;text-shadow:0 1px 6px rgba(0,0,0,.9);color:${faved ? '#e50914' : 'rgba(255,255,255,.85)'};transition:transform .15s" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'">${faved ? '♥' : '♡'}</span><img class="card-img" src="${thumb}" alt="${escHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 220 310%22><rect fill=%22%23222%22 width=%22220%22 height=%22310%22/><text x=%22110%22 y=%22155%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2224%22>🎬</text></svg>'"><div class="card-body"><div class="card-title">${escHtml(title)}</div><div class="card-views">👁 ${escHtml(views)}${code ? ' · <a href="https://sukebei.nyaa.si/?f=0&c=0_0&q=' + encodeURIComponent(code) + '" target="_blank" style="color:#e50914;font-weight:600;text-decoration:none" onclick="event.stopPropagation()">' + escHtml(code) + '</a>' : ''}</div></div></div>`;
 }
 
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -283,10 +301,9 @@ function saveFavorites(favs) {
 function updateFavNav() {
   const favs = getFavorites();
   const link = document.getElementById('favNavLink');
-  if (link) {
-    link.style.display = favs.length ? 'inline' : 'none';
-    link.textContent = '♥ ' + favs.length;
-  }
+  const count = document.getElementById('favCount');
+  if (link) link.style.display = 'inline';
+  if (count) count.textContent = favs.length;
 }
 
 function toggleFavorite(video) {
@@ -411,7 +428,7 @@ async function openPlayer(video, optSite) {
       for (const r of related) {
         const idx = allVideos.length;
         allVideos.push(r);
-        html += `<div class="card" data-idx="${idx}" style="flex:0 0 auto;width:160px"><img class="card-img" src="${r.thumbnail}" alt="" style="height:220px" loading="lazy" onerror="this.style.background='#222'"><div class="card-body"><div class="card-title">${escHtml(r.title || '')}</div></div></div>`;
+        html += `<div class="card" data-idx="${idx}" style="flex:0 0 auto;width:160px"><img class="card-img" src="${r.thumbnail}" alt="" loading="lazy" onerror="this.style.background='#222'"><div class="card-body"><div class="card-title">${escHtml(r.title || '')}</div></div></div>`;
       }
       html += `</div></div>`;
       document.getElementById('playerDesc').insertAdjacentHTML('afterend', html);
@@ -633,6 +650,13 @@ function playRandomVideo() {
   if (!allVideos.length) return;
   const pick = allVideos[Math.floor(Math.random() * allVideos.length)];
   if (pick) openPlayer(pick, pick._site || currentSite);
+}
+
+function playRandomFav() {
+  const favs = getFavorites();
+  if (!favs.length) return;
+  const pick = favs[Math.floor(Math.random() * favs.length)];
+  if (pick) openPlayer({ title: pick.title, path: pick.path, thumbnail: pick.thumbnail }, pick.site);
 }
 
 function closePlayer() {

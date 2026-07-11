@@ -6,6 +6,14 @@ const { URL } = require('url');
 const crypto = require('crypto');
 const dns = require('dns');
 
+const BLOCKED_HOSTS = ['javtrailers.com', 'javtiful.com'];
+const SOCKS5_PROXY = 'socks5://127.0.0.1:1080';
+
+function needsProxy(url) {
+  try { const host = new URL(url).hostname; return BLOCKED_HOSTS.some(b => host === b || host.endsWith('.' + b)); }
+  catch { return false; }
+}
+
 // ============================================================
 // DNS bypass
 // ============================================================
@@ -31,7 +39,7 @@ const AGENTS = {
 // DISK CACHE
 // ============================================================
 const CACHE_DIR = path.join(__dirname, '.video_cache');
-const MAX_DISK_CACHE = 5 * 1024 * 1024 * 1024;
+const MAX_DISK_CACHE = 20 * 1024 * 1024 * 1024;
 const SEGMENT_TTL = 3 * 60 * 60 * 1000;
 const PLAYLIST_TTL = 5 * 60 * 1000;
 const PREFETCH_CONCURRENCY = 6;
@@ -89,9 +97,23 @@ function cacheSet(url, buf) {
 }
 
 // ============================================================
-// FETCH với KeepAlive Agent — vượt Cloudflare
+// FETCH với KeepAlive Agent — vượt Cloudflare. Dùng SOCKS5 cho site bị chặn.
 // ============================================================
 function fetchText(url, referer, extraHeaders = {}) {
+  // Nếu host bị chặn → dùng curl --socks5 ngay
+  if (needsProxy(url)) {
+    return new Promise((resolve, reject) => {
+      try {
+        const { execSync } = require('child_process');
+        const escapedUrl = url.replace(/'/g, "'\\''");
+        const cookieOpt = extraHeaders['Cookie'] ? ` -b '${extraHeaders['Cookie'].replace(/'/g, "'\\''")}'` : '';
+        const cmd = `curl -sL --max-time 30 --socks5 '${SOCKS5_PROXY}' -A '${UA.replace(/'/g, "'\\''")}'${cookieOpt} '${escapedUrl}'`;
+        const out = execSync(cmd, { encoding: 'utf8', timeout: 35000 });
+        if (out && out.length > 100) return resolve(out);
+        reject(new Error('Empty response via proxy'));
+      } catch (e) { reject(e); }
+    });
+  }
   return new Promise((resolve, reject) => {
     const doFetch = (u, redirects = 0) => {
       if (redirects > 5) return reject(new Error('Too many redirects'));
@@ -145,6 +167,19 @@ function fetchText(url, referer, extraHeaders = {}) {
   });
 }
 function fetchBuffer(url, referer) {
+  // Nếu host bị chặn → dùng curl --socks5
+  if (needsProxy(url)) {
+    return new Promise((resolve, reject) => {
+      try {
+        const { execSync } = require('child_process');
+        const escapedUrl = url.replace(/'/g, "'\\''");
+        const cmd = `curl -sfL --max-time 30 --socks5 '${SOCKS5_PROXY}' -A '${UA.replace(/'/g, "'\\''")}' '${escapedUrl}'`;
+        const buf = execSync(cmd, { encoding: 'buffer', timeout: 35000, maxBuffer: 500 * 1024 * 1024 });
+        if (buf && buf.length > 100) return resolve(buf);
+        reject(new Error('Empty response via proxy'));
+      } catch (e) { reject(e); }
+    });
+  }
   return new Promise((resolve, reject) => {
     const isHttps = url.startsWith('https:');
     const mod = isHttps ? https : http;
@@ -202,8 +237,9 @@ async function fetchAndCacheSegment(url, host) {
     } catch {}
     try {
       const { execSync } = require('child_process');
-      const buf = execSync("curl -sfL -A 'Mozilla/5.0' --max-time 20 '" + url.replace(/'/g, "'\\''") + "'", { encoding: 'buffer', timeout: 25000 });
-      if (buf && buf.length > 100) { cacheSet(url, buf); }
+      const proxyFlag = needsProxy(url) ? ` --socks5 '${SOCKS5_PROXY}'` : '';
+      const buf = execSync("curl -sfL -A 'Mozilla/5.0' --max-time 20" + proxyFlag + " '" + url.replace(/'/g, "'\\''") + "'", { encoding: 'buffer', timeout: 25000, maxBuffer: 500 * 1024 * 1024 });
+      if (buf && buf.length > 100) { cacheSet(url, buf); fetchPromises.delete(url); return buf; }
     } catch {}
     fetchPromises.delete(url);
   })();
@@ -252,7 +288,7 @@ function prefetchToEnd(allUrls, idx, host, plUrl) {
 const SITES = {
   javhdz: { base: 'https://javhdz.ws' },
   vlxx: { base: 'https://vlxx.moi' },
-  quatvn: { base: 'https://quatvn.moi' },
+  quatvn: { base: 'https://quatvn.lol' },
   sexbjcam: { base: 'https://sexbjcam.com' },
   javtrailers: { base: 'https://javtrailers.com' },
   javtiful: { base: 'https://javtiful.com' },
@@ -411,8 +447,12 @@ const server = http.createServer(async (req, res) => {
           url = page > 1 ? `${HOST}/videos?page=${page}` : `${HOST}/`;
         }
       } else if (site === 'javtiful') {
-        if (search) {
-          url = `${HOST}/zh/videos?search=${encodeURIComponent(search)}`;
+        if (parsed.searchParams.get('url')) {
+          url = parsed.searchParams.get('url');
+        } else if (category === 'feed') {
+          url = `${HOST}/en/collections/subscriptions`;
+        } else if (search) {
+          url = `${HOST}/search?q=${encodeURIComponent(search)}`;
           if (page > 1) url += `&page=${page}`;
         } else if (category) {
           url = `${HOST}/zh/videos?category=${category}`;
@@ -434,7 +474,15 @@ const server = http.createServer(async (req, res) => {
       }
 
       console.log(`[SCRAPE] ${url}`);
-      const html = await fetchText(url, HOST + '/');
+      // JavTiful: pass auth cookies để search/listing hoạt động
+      let fetchHeaders = {};
+      if (site === 'javtiful') {
+        try {
+          const c = fs.readFileSync(path.join(__dirname, '.javtiful_cookies.txt'), 'utf8').trim();
+          if (c) fetchHeaders['Cookie'] = c;
+        } catch {}
+      }
+      const html = await fetchText(url, HOST + '/', fetchHeaders);
       const videos = [];
       let categories = [];
 
@@ -514,11 +562,23 @@ const server = http.createServer(async (req, res) => {
           if (!categories.find(c => c.slug === es.slug)) categories.push(es);
         }
       } else if (site === 'javtiful') {
+        // Nếu có url tùy chỉnh (vd: subscriptions), thử fetch với auth cookie trước
+        let javHtml = html;
+        if (parsed.searchParams.get('url')) {
+          const javCookiesPath = path.join(__dirname, '.javtiful_cookies.txt');
+          try {
+            const cookieStr = fs.readFileSync(javCookiesPath, 'utf8').trim();
+            if (cookieStr) {
+              const authHtml = await fetchText(url, HOST + '/', { 'Cookie': cookieStr });
+              if (authHtml && authHtml.length > 1000 && !authHtml.includes('login')) javHtml = authHtml;
+            }
+          } catch {}
+        }
         // Phần tử card + title nằm rời nhau trong HTML, dùng index pairing
         const parseVids = (h) => {
           const out = [];
-          const thumbs = [...h.matchAll(/<a\s+href="(\/zh\/video\/\d+\/[^"]+)"\s+class="front-video-thumb"[\s\S]*?data-front-lazy-src="([^"]+)"[\s\S]*?class="front-duration-tag"[^>]*>([^<]+)<\/span>/g)];
-          const titles = [...h.matchAll(/<a\s+href="(\/zh\/video\/\d+\/[^"]+)"\s+class="front-video-title"[^>]*>([^<]+)<\/a>/g)];
+          const thumbs = [...h.matchAll(/<a\s+href="(\/(?:zh\/)?video\/\d+\/[^"]+)"\s+class="front-video-thumb"[^>]*>[\s\S]*?data-front-lazy-src="([^"]+)"[\s\S]*?class="front-duration-tag"[^>]*>([^<]+)<\/span>/g)];
+          const titles = [...h.matchAll(/<a\s+href="(\/(?:zh\/)?video\/\d+\/[^"]+)"\s+class="front-video-title"[^>]*>([^<]+)<\/a>/g)];
           for (let i = 0; i < Math.min(thumbs.length, titles.length); i++) {
             out.push({
               title: titles[i][2],
@@ -529,8 +589,8 @@ const server = http.createServer(async (req, res) => {
           }
           return out;
         };
-        videos.length = 0; videos.push(...parseVids(html));
-        categories = [{ slug: 'newest', name: 'Mới nhất' }, { slug: 'trending', name: 'Xu hướng' }];
+        videos.length = 0; videos.push(...parseVids(javHtml));
+        categories = [{ slug: 'newest', name: 'Mới nhất' }, { slug: 'trending', name: 'Xu hướng' }, { slug: 'feed', name: '📺 Feed' }];
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -620,6 +680,25 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // Proxy thumbnail cho site bị chặn (trình duyệt không load được trực tiếp)
+      if (['javtrailers', 'javtiful'].includes(site)) {
+        for (const v of videos) {
+          if (v.thumbnail && !v.thumbnail.startsWith('/api/')) {
+            // JavTrailers: upgrade thumbnail lên 800px thay vì 360px
+            if (site === 'javtrailers') v.thumbnail = v.thumbnail.replace(/ps\.w\d+\.webp/, 'pl.w800.webp');
+            v.thumbnail = `/api/proxy/image?url=${encodeURIComponent(v.thumbnail)}&site=${site}`;
+          }
+        }
+        for (const row of studioRows) {
+          for (const v of row.videos || []) {
+            if (v.thumbnail && !v.thumbnail.startsWith('/api/')) {
+              if (site === 'javtrailers') v.thumbnail = v.thumbnail.replace(/ps\.w\d+\.webp/, 'pl.w800.webp');
+              v.thumbnail = `/api/proxy/image?url=${encodeURIComponent(v.thumbnail)}&site=${site}`;
+            }
+          }
+        }
+      }
+
       return sendJSON(res, { success: true, page: parseInt(page), hasMore: parseInt(page) < totalPages, totalPages, videos, categories, studioRows });
 
     // ==================== API: CHI TIẾT VIDEO ====================
@@ -662,9 +741,12 @@ const server = http.createServer(async (req, res) => {
       if (thumbnail && !thumbnail.startsWith('http')) thumbnail = HOST + '/' + thumbnail.replace(/^\//, '');
 
       const tags = [];
+      let javCode = null;
       if (site === 'vlxx') {
         const tb = html.match(/<div class="video-tags">([\s\S]*?)<\/div>/);
         if (tb) { const tr = /<a href="([^"]+)" title="([^"]+)">/g; let m; while ((m = tr.exec(tb[1]))) tags.push({ slug: m[1].replace(/^\//, '').replace(/\/$/, ''), name: m[2] }); }
+        const jc = html.match(/<span class="video-code">([^<]+)<\/span>/);
+        if (jc) javCode = jc[1].trim();
       } else if (site === 'quatvn') {
         const tr = /<a href="[^"]*\/tag\/([^"\/]+)\/"[\s\S]*?>([^<]+)<\/a>/g; let m;
         while ((m = tr.exec(html))) tags.push({ slug: m[1], name: m[2].trim() });
@@ -759,24 +841,38 @@ const server = http.createServer(async (req, res) => {
       // --- JAVTIFUL ---
       if (site === 'javtiful') {
         try {
-          const { chromium } = require('playwright');
-          const browser = await (async () => {
-            if (global.__pwBrowser) return global.__pwBrowser;
-            const b = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-            global.__pwBrowser = b;
-            return b;
-          })();
-          const page = await browser.newPage();
-          await page.goto('https://javtiful.com' + videoPath, { timeout: 15000, waitUntil: 'domcontentloaded' });
-          await page.waitForTimeout(2000);
-          const vidSrc = await page.evaluate(() => { const v = document.getElementById('front-player'); return v ? v.src : null; });
-          await page.close();
-          if (vidSrc && vidSrc.startsWith('http')) {
-            streamUrl = vidSrc;
-            proxiedStreamUrl = vidSrc;
-            const titleM = html.match(/property="og:title"[^>]*content="([^"]+)"/);
-            if (titleM) title = titleM[1].replace(/\s*\|.*$/, '').trim();
-            console.log(`[JavTiful] Stream: ${streamUrl.slice(0, 60)}`);
+          const javUrl = HOST + cleanPath;
+          const javCookiesPath = path.join(__dirname, '.javtiful_cookies.txt');
+          let extraHeaders = {};
+          try {
+            const cookieStr = fs.readFileSync(javCookiesPath, 'utf8').trim();
+            if (cookieStr) extraHeaders['Cookie'] = cookieStr;
+          } catch {}
+          const javHtml = await fetchText(javUrl, HOST + '/', extraHeaders);
+          // R2 signed URL in playerSources JSON config (server-rendered)
+          const psMatch = javHtml.match(/"playerSources":(\[[\s\S]*?\])\s*(?:,|\})/);
+          if (psMatch) {
+            // Fix \\u0026 -> & for JSON parsing, then parse
+            const cleaned = psMatch[1].replace(/\\\\u0026/g, '&');
+            try {
+              const sources = JSON.parse(cleaned);
+              if (sources.length && sources[0].src) {
+                streamUrl = sources[0].src;
+                proxiedStreamUrl = `/api/proxy/javtiful.mp4?url=${encodeURIComponent(sources[0].src)}`;
+                console.log(`[JavTiful] Stream: ${streamUrl.slice(0, 60)}...`);
+              }
+            } catch (e) {
+              console.log(`[JavTiful] JSON parse error: ${e.message}`);
+            }
+          }
+          if (!streamUrl) {
+            // Fallback: try direct src pattern in JSON config
+            const srcMatch = javHtml.match(/"src"\s*:\s*"(https:\/\/[^"]*cloudflarestorage[^"]*)"/);
+            if (srcMatch) {
+              streamUrl = srcMatch[1].replace(/\\\\u0026/g, '&');
+              proxiedStreamUrl = streamUrl;
+              console.log(`[JavTiful] Fallback stream: ${streamUrl.slice(0, 60)}...`);
+            }
           }
         } catch (e) { console.log(`[JavTiful] Error: ${e.message}`); }
       }
@@ -885,10 +981,16 @@ const server = http.createServer(async (req, res) => {
           } catch {}
         }
 
+      // Proxy thumbnail cho site bị chặn
+      if (['javtrailers', 'javtiful'].includes(site) && thumbnail && !thumbnail.startsWith('/api/')) {
+        if (site === 'javtrailers') thumbnail = thumbnail.replace(/ps\.w\d+\.webp/, 'pl.w800.webp');
+        thumbnail = `/api/proxy/image?url=${encodeURIComponent(thumbnail)}&site=${site}`;
+      }
+
       const result = {
         success: true, videoId, title, description, thumbnail, tags, servers,
         streamUrl, proxiedStreamUrl, vttUrl, proxiedVtt, playlist: quatvnPlaylist,
-        torrent
+        torrent, javCode
       };
 
       // Lưu cache
@@ -1148,6 +1250,22 @@ const server = http.createServer(async (req, res) => {
         if (!res.headersSent) { res.writeHead(500); res.end('Download failed: ' + e.message); }
       }
 
+    // ==================== API: BATCH CODES ====================
+    } else if (pathname === '/api/batch-codes') {
+      const pathsRaw = parsed.searchParams.get('paths');
+      if (!pathsRaw) return sendJSON(res, {});
+      const paths = pathsRaw.split(',').slice(0, 10);
+      const results = {};
+      await Promise.all(paths.map(async (p) => {
+        try {
+          const decoded = decodeURIComponent(p);
+          const body = await fetchText(HOST + decoded);
+          const code = body.match(/([A-Z]{2,6}-\d+)/);
+          if (code) results[p] = code[1];
+        } catch {}
+      }));
+      return sendJSON(res, results);
+
     // ==================== API: SUKEBEI SEARCH ====================
     } else if (pathname === '/api/sukebei-search') {
       const code = parsed.searchParams.get('code');
@@ -1287,6 +1405,189 @@ const server = http.createServer(async (req, res) => {
         'Accept-Ranges': 'bytes'
       });
       res.end(buf);
+
+    // ==================== PROXY: JAVTIFUL MP4 (full cache) ====================
+    } else if (pathname === '/api/proxy/javtiful.mp4') {
+      const targetUrl = parsed.searchParams.get('url');
+      if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
+
+      // Cache key: hash of URL
+      const hash = require('crypto').createHash('md5').update(targetUrl).digest('hex');
+      const cacheFile = path.join(CACHE_DIR, hash + '.mp4');
+      const tempFile = cacheFile + '.downloading';
+      const stat = fs.existsSync(cacheFile) ? fs.statSync(cacheFile) : null;
+      const range = req.headers.range || '';
+      const urlHash = targetUrl.split('?')[0].split('/').pop();
+
+      console.log(`[JavTiful Cache] ${urlHash} | Range: ${range || 'full'} | Cached: ${stat ? 'YES' : 'NO'}`);
+
+      // Nếu đã cache đầy đủ → serve từ file
+      if (stat && stat.size > 0) {
+        const fileSize = stat.size;
+        if (range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const chunkSize = (end - start) + 1;
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Content-Length': chunkSize,
+            'Content-Type': 'video/mp4',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400',
+          });
+          const stream = fs.createReadStream(cacheFile, { start, end });
+          stream.pipe(res);
+        } else {
+          res.writeHead(200, {
+            'Content-Length': fileSize,
+            'Content-Type': 'video/mp4',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400',
+          });
+          fs.createReadStream(cacheFile).pipe(res);
+        }
+        return;
+      }
+
+      // Chưa có cache → download + serve đồng thời
+      // Tránh download trùng
+      const alreadyDownloading = global.__javtifulDownloads || {};
+      const dlKey = hash;
+
+      if (!alreadyDownloading[dlKey]) {
+        alreadyDownloading[dlKey] = true;
+        global.__javtifulDownloads = alreadyDownloading;
+
+        const urlObj = new URL(targetUrl);
+        const mod = urlObj.protocol === 'https:' ? https : http;
+
+        // Tạo temp file để ghi dần
+        const writeStream = fs.createWriteStream(tempFile);
+        let downloadedBytes = 0;
+        let totalSize = 0;
+
+        console.log(`[JavTiful] Bắt đầu download: ${urlHash}`);
+        mod.get(targetUrl, {
+          headers: { 'User-Agent': UA },
+          rejectUnauthorized: false,
+          timeout: 600000, // 10 phút
+        }, upstream => {
+          totalSize = parseInt(upstream.headers['content-length'] || '0', 10);
+          console.log(`[JavTiful] Size: ${(totalSize/1e9).toFixed(2)}GB`);
+
+          upstream.on('data', chunk => {
+            downloadedBytes += chunk.length;
+            writeStream.write(chunk);
+          });
+
+          upstream.on('end', () => {
+            writeStream.end();
+            // Rename temp → cache khi hoàn tất
+            fs.renameSync(tempFile, cacheFile);
+            console.log(`[JavTiful] ✅ Cache hoàn tất: ${urlHash} (${(downloadedBytes/1e9).toFixed(2)}GB)`);
+            delete global.__javtifulDownloads[dlKey];
+          });
+
+          upstream.on('error', err => {
+            console.log(`[JavTiful] ❌ Download error: ${err.message}`);
+            writeStream.end();
+            try { fs.unlinkSync(tempFile); } catch {}
+            delete global.__javtifulDownloads[dlKey];
+          });
+        }).on('error', err => {
+          console.log(`[JavTiful] ❌ Request error: ${err.message}`);
+          writeStream.end();
+          try { fs.unlinkSync(tempFile); } catch {}
+          delete global.__javtifulDownloads[dlKey];
+        });
+      } else {
+        console.log(`[JavTiful] Đang download bởi request khác: ${urlHash}`);
+      }
+
+      // Serve từ temp file nếu có, hoặc stream từ upstream
+      const tempStat = fs.existsSync(tempFile) ? fs.statSync(tempFile) : null;
+      if (tempStat && tempStat.size > 0) {
+        const fileSize = tempStat.size;
+        if (range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const chunkSize = (end - start) + 1;
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Content-Length': chunkSize,
+            'Content-Type': 'video/mp4',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400',
+          });
+          const stream = fs.createReadStream(tempFile, { start, end });
+          stream.pipe(res);
+        } else {
+          res.writeHead(200, {
+            'Content-Length': fileSize,
+            'Content-Type': 'video/mp4',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400',
+          });
+          fs.createReadStream(tempFile).pipe(res);
+        }
+      } else {
+        // Fallback: stream trực tiếp từ upstream (không cache)
+        const urlObj = new URL(targetUrl);
+        const mod = urlObj.protocol === 'https:' ? https : http;
+        mod.get(targetUrl, {
+          headers: { 'User-Agent': UA, ...(range ? { 'Range': range } : {}) },
+          rejectUnauthorized: false,
+          timeout: 30000,
+        }, upstream => {
+          const status = range ? 206 : 200;
+          const respHeaders = {
+            'Access-Control-Allow-Origin': '*',
+            'Accept-Ranges': 'bytes',
+          };
+          if (upstream.headers['content-range']) respHeaders['Content-Range'] = upstream.headers['content-range'];
+          if (upstream.headers['content-length']) respHeaders['Content-Length'] = upstream.headers['content-length'];
+          if (upstream.headers['content-type']) respHeaders['Content-Type'] = upstream.headers['content-type'];
+          else respHeaders['Content-Type'] = 'video/mp4';
+          res.writeHead(status, respHeaders);
+          upstream.pipe(res);
+        }).on('error', () => {
+          if (!res.headersSent) res.writeHead(502);
+          res.end('Proxy error');
+        });
+      }
+
+    // ==================== API: RANDOM (javtiful) ====================
+    } else if (pathname === '/api/random') {
+      (async () => {
+        try {
+          // Fetch subscriptions list
+          const listUrl = `https://javtiful.com/en/collections/subscriptions`;
+          const cookieStr = fs.readFileSync(path.join(__dirname, '.javtiful_cookies.txt'), 'utf8').trim();
+          const html = await fetchText(listUrl, HOST + '/', { 'Cookie': cookieStr });
+          // Parse video paths
+          const paths = [...html.matchAll(/href="(\/(?:zh\/)?video\/\d+\/[^"]+)"/g)].map(m => m[1]);
+          const unique = [...new Set(paths)];
+          if (!unique.length) return sendJSON(res, { success: false, error: 'No videos found' });
+          // Pick random
+          const randomPath = unique[Math.floor(Math.random() * unique.length)];
+          // Get stream URL
+          const detailUrl = `http://localhost:${PORT}/api/video-detail?path=${encodeURIComponent(randomPath)}&site=javtiful`;
+          const detailResp = await new Promise((resolve, reject) => {
+            http.get(detailUrl, r => { const c = []; r.on('data', d => c.push(d)); r.on('end', () => { try { resolve(JSON.parse(Buffer.concat(c).toString())); } catch { resolve(null); } }); }).on('error', reject);
+          });
+          if (detailResp && detailResp.streamUrl) {
+            sendJSON(res, { success: true, path: randomPath, title: detailResp.title, streamUrl: detailResp.streamUrl, proxiedStreamUrl: detailResp.proxiedStreamUrl });
+          } else {
+            sendJSON(res, { success: false, error: 'Cannot get stream' });
+          }
+        } catch (e) { sendJSON(res, { success: false, error: e.message }); }
+      })();
 
     // ==================== API: SITES ====================
     } else if (pathname === '/api/sites') {

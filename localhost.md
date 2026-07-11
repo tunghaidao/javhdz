@@ -14,10 +14,11 @@ node server.js
 |---|---|
 | JavHDz | Cơ bản |
 | VLXX | Cơ bản |
-| QuạtVN | Có thể bị chặn |
 | SexBJCam | Embed iframe |
 | JavTrailers | Cần Warp (SOCKS5) nếu ISP chặn |
 | JavTiful | Cần Warp + cookies để dùng Feed |
+
+> **QuạtVN** đã ngừng hoạt động (`quatvn.lol` NXDOMAIN) — đã xoá khỏi danh sách.
 
 ## ISP block bypass (JavTrailers, JavTiful)
 

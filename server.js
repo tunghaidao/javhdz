@@ -299,7 +299,6 @@ function prefetchToEnd(allUrls, idx, host, plUrl) {
 const SITES = {
   javhdz: { base: 'https://javhdz.ws' },
   vlxx: { base: 'https://vlxx.moi' },
-  quatvn: { base: 'https://quatvn.lol' },
   sexbjcam: { base: 'https://sexbjcam.com' },
   javtrailers: { base: 'https://javtrailers.com' },
   javtiful: { base: 'https://javtiful.com' },
@@ -1612,7 +1611,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k, base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k, base: v.base }
         ]))
       });
 

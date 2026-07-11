@@ -992,7 +992,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // --- 18TUBE (creator directory, no stream) ---
+      // --- 18TUBE (creator detail → fetch video list from API) ---
       if (site === '18tube') {
         const nameM = html.match(/<h1[^>]*class="creator-name"[^>]*>([\s\S]*?)<\/h1>/);
         const descM = html.match(/<div[^>]*class="creator-description"[^>]*>([\s\S]*?)<\/div>/);
@@ -1002,9 +1002,28 @@ const server = http.createServer(async (req, res) => {
           const tm = html.match(/<img[^>]*class="creator-avatar"[^>]*src="([^"]+)"/);
           if (tm) thumbnail = tm[1];
         }
-        // Trả về URL gốc để mở trong tab mới
-        streamUrl = url;
-        proxiedStreamUrl = null;
+        // Lấy post_id từ data-id của tab-content
+        const idMatch = html.match(/tab-content[^>]*data-id="(\d+)"/);
+        const postId = idMatch ? idMatch[1] : null;
+        if (postId) {
+          try {
+            const apiUrl = `${HOST}/wp-json/myapi/v1/media-items?page=1&type=videos&id=${postId}`;
+            const apiResp = await fetchText(apiUrl, HOST + '/');
+            const items = JSON.parse(apiResp);
+            if (Array.isArray(items) && items.length) {
+              const playlist = items.map((item, idx) => ({
+                index: idx,
+                title: `Video ${idx + 1}`,
+                streamUrl: item.source,
+                proxiedStreamUrl: `/api/proxy/pl.m3u8?url=${encodeURIComponent(item.source)}&s=18tube`,
+                thumbnail: item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : 'https:' + item.thumbnail) : thumbnail
+              }));
+              quatvnPlaylist = playlist; // reuse playlist field
+              streamUrl = playlist[0].streamUrl;
+              proxiedStreamUrl = playlist[0].proxiedStreamUrl;
+            }
+          } catch (e) { console.log('[18Tube] API error:', e.message); }
+        }
       }
 
       // VTT thumbnails

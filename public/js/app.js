@@ -410,7 +410,7 @@ async function openPlayer(video, optSite) {
 
   // Download yt-dlp command
   const streamUrl = detail.streamUrl || '';
-  document.getElementById('playerActions').innerHTML = streamUrl ? '<a href="/api/download-cached?pl=' + encodeURIComponent(streamUrl) + '&s=' + site + '" class="btn-secondary" style="font-size:12px;padding:4px 12px;text-decoration:none;color:#fff;background:var(--surface2);border-radius:6px">⬇ Cache</a><button class="btn-secondary" onclick="nextRandom()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🎲 Tiếp</button><button class="btn-secondary" onclick="clearVideoCache()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🗑 Cache</button><button class="btn-secondary" onclick="showClipDialog()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">✂ Cắt</button>' : '';
+  document.getElementById('playerActions').innerHTML = streamUrl ? '<a href="/api/download-cached?pl=' + encodeURIComponent(streamUrl) + '&s=' + site + '" class="btn-secondary" style="font-size:12px;padding:4px 12px;text-decoration:none;color:#fff;background:var(--surface2);border-radius:6px">⬇ Cache</a><button class="btn-secondary" onclick="nextRandom()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🎲 Tiếp</button><button class="btn-secondary" onclick="nextRandomFav()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#e50914;border:none;border-radius:6px;cursor:pointer;font-weight:600">♥ Tiếp</button><button class="btn-secondary" onclick="clearVideoCache()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">🗑 Cache</button><button class="btn-secondary" onclick="showClipDialog()" style="font-size:12px;padding:4px 12px;margin-left:6px;background:var(--surface2);color:#fff;border:none;border-radius:6px;cursor:pointer">✂ Cắt</button>' : '';
   // Xoá command cũ nếu có
   const oldCmd = document.querySelector('.dl-cmd-row');
   if (oldCmd) oldCmd.remove();
@@ -676,6 +676,16 @@ function nextRandom() {
   if (!others.length) return;
   const pick = others[Math.floor(Math.random() * others.length)];
   if (pick) openPlayer(pick, pick._site || currentSite);
+}
+
+function nextRandomFav() {
+  const favs = getFavorites();
+  if (!favs.length) return;
+  const currentKey = (window._lastSite || currentSite) + ':' + (window._lastVideoPath || '');
+  const others = favs.filter(f => f.key !== currentKey);
+  if (!others.length) { playRandomFav(); return; }
+  const pick = others[Math.floor(Math.random() * others.length)];
+  if (pick) openPlayer({ title: pick.title, path: pick.path, thumbnail: pick.thumbnail }, pick.site);
 }
 
 function playRandomVideo() {

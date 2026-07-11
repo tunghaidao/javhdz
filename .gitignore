@@ -6,3 +6,6 @@ node_modules/
 __pycache__/
 *.pyc
 .hermes/
+.javtiful_cookies.txt
+.local/
+favorites.json

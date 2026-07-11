@@ -110,8 +110,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   document.querySelector('.menu-toggle').addEventListener('click', () => { document.getElementById('navLinks').classList.toggle('open'); });
 
-  // Hiện nút yêu thích nếu có dữ liệu cũ
-  updateFavNav();
+  // Load favorites từ server
+  loadFavs();
 
   loadVideos();
 });
@@ -286,50 +286,59 @@ function changePage(delta) { currentPage += delta; if (currentPage < 1) currentP
 let currentHls = null;
 let currentVideoPath = '';
 
-// Favorites
-const FAV_KEY = 'netflix_favs';
+// Favorites — server-sync (đồng bộ giữa các thiết bị)
+let serverFavs = [];
+let favLoaded = false;
 
 function getFavorites() {
-  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+  return serverFavs;
 }
 
-function saveFavorites(favs) {
-  localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+async function loadFavs() {
+  try {
+    const r = await fetch('/api/favorites');
+    const d = await r.json();
+    if (d.success) { serverFavs = d.favorites; favLoaded = true; }
+  } catch {}
   updateFavNav();
 }
 
-function updateFavNav() {
-  const favs = getFavorites();
-  const link = document.getElementById('favNavLink');
-  const count = document.getElementById('favCount');
-  if (link) link.style.display = 'inline';
-  if (count) count.textContent = favs.length;
-}
-
-function toggleFavorite(video) {
-  const favs = getFavorites();
-  const key = currentSite + ':' + video.path;
-  const idx = favs.findIndex(f => f.key === key);
-  if (idx > -1) { favs.splice(idx, 1); } else { favs.push({ key, site: currentSite, path: video.path, title: video.title, thumbnail: video.thumbnail }); }
-  saveFavorites(favs);
-  // Re-render cards to update hearts
+async function toggleFavorite(video, optSite) {
+  const site = optSite || currentSite;
+  const key = site + ':' + video.path;
+  const idx = serverFavs.findIndex(f => f.key === key);
+  if (idx > -1) { serverFavs.splice(idx, 1); } else { serverFavs.push({ key, site, path: video.path, title: video.title, thumbnail: video.thumbnail }); }
+  updateFavNav();
   renderRows(allVideos);
+  try {
+    await fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'toggle', site, path: video.path, title: video.title, thumbnail: video.thumbnail })
+    });
+  } catch {}
 }
 
 function isFavorite(video) {
-  const key = currentSite + ':' + video.path;
-  return getFavorites().some(f => f.key === key);
+  const key = (currentSite) + ':' + video.path;
+  return serverFavs.some(f => f.key === key);
+}
+
+function updateFavNav() {
+  const link = document.getElementById('favNavLink');
+  const count = document.getElementById('favCount');
+  if (link) link.style.display = 'inline';
+  if (count) count.textContent = serverFavs.length;
 }
 
 function showFavorites() {
   closePlayer();
-  const favs = getFavorites();
+  const favs = serverFavs;
   const content = document.getElementById('content');
   if (!favs.length) { content.innerHTML = '<div class="loading-screen"><p style="color:#aaa">Chua co video yeu thich.</p></div>'; return; }
   currentSite = 'fav';
   document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
   document.getElementById('favNavLink').style.color = '#fff';
-  // Render favorites with site data attributes
   const vids = favs.map(f => ({ title: f.title, path: f.path, thumbnail: f.thumbnail, views: '♥', _site: f.site }));
   allVideos = vids;
   renderRows(vids);

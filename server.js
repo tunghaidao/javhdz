@@ -8,6 +8,17 @@ const dns = require('dns');
 
 const BLOCKED_HOSTS = ['javtrailers.com', 'javtiful.com'];
 const SOCKS5_PROXY = 'socks5://127.0.0.1:1080';
+const FAVORITES_FILE = path.join(__dirname, 'favorites.json');
+
+// ============================================================
+// Favorites (server-side, sync across devices)
+// ============================================================
+function loadFavorites() {
+  try { return JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf8')); } catch { return []; }
+}
+function saveFavorites(favs) {
+  fs.writeFileSync(FAVORITES_FILE, JSON.stringify(favs, null, 2));
+}
 
 function needsProxy(url) {
   try { const host = new URL(url).hostname; return BLOCKED_HOSTS.some(b => host === b || host.endsWith('.' + b)); }
@@ -1597,6 +1608,31 @@ const server = http.createServer(async (req, res) => {
           k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuạtVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k, base: v.base }
         ]))
       });
+
+    // ==================== FAVORITES API ====================
+    } else if (pathname === '/api/favorites') {
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            if (data.action === 'toggle') {
+              let favs = loadFavorites();
+              const key = data.site + ':' + data.path;
+              const idx = favs.findIndex(f => f.key === key);
+              if (idx > -1) { favs.splice(idx, 1); } else { favs.push({ key, site: data.site, path: data.path, title: data.title, thumbnail: data.thumbnail }); }
+              saveFavorites(favs);
+              return sendJSON(res, { success: true, favorited: idx === -1, count: favs.length });
+            }
+            if (data.action === 'list') {
+              return sendJSON(res, { success: true, favorites: loadFavorites() });
+            }
+          } catch (e) { sendJSON(res, { success: false, error: e.message }, 400); }
+        });
+      } else {
+        return sendJSON(res, { success: true, favorites: loadFavorites() });
+      }
 
     // ==================== STATIC FILES ====================
     } else {

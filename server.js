@@ -420,22 +420,29 @@ const server = http.createServer(async (req, res) => {
         }
       } else if (site === 'javtrailers') {
         if (search) {
-          // Tìm diễn viên qua /casts/{slug}
-          const castSlug = search.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-          // Thử 2 thứ tự tên (Nhật: họ trước tên sau)
-          const parts = castSlug.split('-');
-          const slugs = [castSlug];
-          if (parts.length > 1 && parts[1] !== parts[0]) {
-            slugs.push([...parts.slice(1), parts[0]].join('-'));
-          }
-          // Thử từng slug cho tới khi có kết quả
-          for (const slug of slugs) {
-            url = `${HOST}/casts/${slug}`;
-            if (page > 1) url += `?page=${page}`;
-            try {
-              const testHtml = await fetchText(url, HOST + '/');
-              if (testHtml.includes('vid-title')) break;
-            } catch { continue; }
+          // Thử tìm video theo code/title trước, fallback cast
+          const searchUrl = `${HOST}/videos?q=${encodeURIComponent(search)}`;
+          if (page > 1) url = `${searchUrl}&page=${page}`;
+          try {
+            const testHtml = await fetchText(page > 1 ? `${searchUrl}&page=${page}` : searchUrl, HOST + '/');
+            if (testHtml.includes('vid-title')) { url = page > 1 ? `${searchUrl}&page=${page}` : searchUrl; }
+            else throw new Error('No results');
+          } catch {
+            // Fallback: tìm diễn viên qua /casts/{slug}
+            const castSlug = search.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            const parts = castSlug.split('-');
+            const slugs = [castSlug];
+            if (parts.length > 1 && parts[1] !== parts[0]) {
+              slugs.push([...parts.slice(1), parts[0]].join('-'));
+            }
+            for (const slug of slugs) {
+              url = `${HOST}/casts/${slug}`;
+              if (page > 1) url += `?page=${page}`;
+              try {
+                const testHtml = await fetchText(url, HOST + '/');
+                if (testHtml.includes('vid-title')) break;
+              } catch { continue; }
+            }
           }
         } else if (category) {
           // Studio slug luôn dùng /studios/{slug}

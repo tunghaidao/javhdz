@@ -57,7 +57,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (heart) {
       e.stopPropagation();
       const idx = heart.dataset.idx;
-      if (idx !== undefined && allVideos[idx]) toggleFavorite(allVideos[idx]);
+      if (idx !== undefined && allVideos[idx]) {
+        const v = allVideos[idx];
+        toggleFavorite(v, v._site);
+      }
       return;
     }
     const card = e.target.closest('.card');
@@ -298,7 +301,27 @@ async function loadFavs() {
   try {
     const r = await fetch('/api/favorites');
     const d = await r.json();
-    if (d.success) { serverFavs = d.favorites; favLoaded = true; }
+    if (d.success) {
+      serverFavs = d.favorites;
+      // Migrate localStorage favorites cũ lên server
+      try {
+        const old = JSON.parse(localStorage.getItem('netflix_favs') || '[]');
+        if (old.length) {
+          for (const f of old) {
+            if (!serverFavs.some(sf => sf.key === f.key)) {
+              await fetch('/api/favorites', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'toggle', site: f.site, path: f.path, title: f.title, thumbnail: f.thumbnail })
+              });
+              serverFavs.push(f);
+            }
+          }
+          localStorage.removeItem('netflix_favs');
+        }
+      } catch {}
+      favLoaded = true;
+    }
   } catch {}
   updateFavNav();
 }
@@ -366,7 +389,7 @@ async function openPlayer(video, optSite) {
   heartBtn.textContent = isFav ? '♥' : '♡';
   heartBtn.style.cssText = 'background:none;border:none;color:' + (isFav ? '#e50914' : '#fff') + ';font-size:22px;cursor:pointer;opacity:.8;margin-right:8px;flex-shrink:0';
   heartBtn.onclick = () => {
-    toggleFavorite(video);
+    toggleFavorite(video, site);
     heartBtn.textContent = getFavorites().some(f => f.key === site + ':' + video.path) ? '♥' : '♡';
     heartBtn.style.color = getFavorites().some(f => f.key === site + ':' + video.path) ? '#e50914' : '#fff';
   };

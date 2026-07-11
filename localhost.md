@@ -16,7 +16,7 @@ node server.js
 | VLXX | Cơ bản |
 | QuạtVN | quatvn.mom (thay .lol) |
 | SexBJCam | Embed iframe |
-| 18Tube | Creator directory (OnlyFans) |
+| 18Tube | Creator OnlyFans — fetch 43 videos từ API, HLS stream |
 | JavTrailers | Cần Warp (SOCKS5) nếu ISP chặn |
 | JavTiful | Cần Warp + cookies để dùng Feed |
 

@@ -304,7 +304,14 @@ const SITES = {
   javtrailers: { base: 'https://javtrailers.com' },
   javtiful: { base: 'https://javtiful.com' },
   '18tube': { base: 'https://18tube.my' },
+  viet69: { base: 'https://viet69.be' },
 };
+
+/** Referer cho proxy stream — CDN viet69 (cd-vs) cần emb.cd-vs.com */
+function proxyRefererFor(url, site, host) {
+  if (site === 'viet69' || /cd-vs\.com/i.test(url || '')) return 'https://emb.cd-vs.com/';
+  return (host || getHost(site || 'javhdz')) + '/';
+}
 
 function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
 
@@ -406,6 +413,17 @@ const server = http.createServer(async (req, res) => {
         } else if (category) {
           url = `${HOST}/${category}/`;
           if (page > 1) url += `page/${page}/`;
+        } else {
+          url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
+        }
+      } else if (site === 'viet69') {
+        if (search) {
+          url = page > 1
+            ? `${HOST}/page/${page}/?s=${encodeURIComponent(search)}`
+            : `${HOST}/?s=${encodeURIComponent(search)}`;
+        } else if (category) {
+          // menu slugs are top-level (/sex-viet/, /sinh-vien/, ...) not always /category/
+          url = page > 1 ? `${HOST}/${category}/page/${page}/` : `${HOST}/${category}/`;
         } else {
           url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
         }
@@ -534,6 +552,49 @@ const server = http.createServer(async (req, res) => {
           { slug: 'phim-sex-han-quoc', name: 'Hàn Quốc' }, { slug: 'phim-sex-us', name: 'US-UK' },
           { slug: 'phim-sex-thai-lan', name: 'Thái Lan' }, { slug: 'phim-sex-nhat-ban', name: 'Nhật Bản' },
           { slug: 'phim-sex-malaysia', name: 'Malaysia' }
+        ];
+      } else if (site === 'viet69') {
+        // Main loop only — skip community /bai-viet/ section
+        const loop = html.match(/<div class="loop-content[\s\S]*?<!-- end \.loop-content -->/)?.[0] || html;
+        const cards = loop.match(/<div id="post-\d+"[^>]*class="[^"]*item-video[^"]*"[\s\S]*?(?=<div id="post-\d+"|<!-- end \.loop-content|$)/g) || [];
+        for (const card of cards) {
+          const hrefM = card.match(/<a class="clip-link"[^>]*href="([^"]+)"/i)
+            || card.match(/<h2 class="entry-title"><a href="([^"]+)"/i);
+          const titleM = card.match(/<a class="clip-link"[^>]*title="([^"]*)"/i)
+            || card.match(/<h2 class="entry-title"><a[^>]*>([^<]+)/i)
+            || card.match(/alt="([^"]+)"/i);
+          const thumbM = card.match(/<img[^>]+src="([^"]+)"/i);
+          const viewsM = card.match(/<span class="views">[\s\S]*?<i class="count">([^<]*)<\/i>/i);
+          if (!hrefM || !titleM) continue;
+          let p = hrefM[1];
+          try { p = p.startsWith('http') ? new URL(p).pathname : p; } catch {}
+          if (p.startsWith('/bai-viet/')) continue;
+          videos.push({
+            title: titleM[1].replace(/&#\d+;|&amp;/g, s => s).replace(/&amp;/g, '&').trim(),
+            path: p,
+            thumbnail: thumbM ? thumbM[1] : '',
+            views: viewsM ? viewsM[1].trim() : 'N/A'
+          });
+        }
+        // Fallback: entry-title pairing if card split fails
+        if (!videos.length) {
+          const re = /<a class="clip-link"[^>]*title="([^"]*)"[^>]*href="([^"]+)"[\s\S]*?<img[^>]+src="([^"]+)"/g;
+          let m; while ((m = re.exec(loop))) {
+            let p = m[2];
+            try { p = p.startsWith('http') ? new URL(p).pathname : p; } catch {}
+            if (p.startsWith('/bai-viet/')) continue;
+            videos.push({ title: m[1].trim(), path: p, thumbnail: m[3], views: 'N/A' });
+          }
+        }
+        categories = [
+          { slug: 'sex-viet', name: 'Phim sex mới' },
+          { slug: 'sinh-vien', name: 'Sinh viên' },
+          { slug: 'teen', name: 'Teen' },
+          { slug: 'check-hang', name: 'Check hàng' },
+          { slug: 'camera', name: 'Camera' },
+          { slug: 'bdsm', name: 'BDSM' },
+          { slug: 'may-bay-ba-gia', name: 'Máy bay bà già' },
+          { slug: 'thu-dam', name: 'Thủ dâm' },
         ];
       } else if (site === 'sexbjcam') {
         const blocked = ['jinricp', 'mscrew33'];
@@ -685,6 +746,15 @@ const server = http.createServer(async (req, res) => {
         // Nếu có Next nhưng chỉ thấy ≤4 trang → set mặc định 99 (vô hạn)
         if (hasNext && maxVisible <= 4) totalPages = 999;
         else totalPages = maxVisible || 1;
+      } else if (site === 'viet69') {
+        // "Page 1 of 1,007"
+        const ofM = html.match(/Page\s+\d+\s+of\s+([\d,]+)/i);
+        if (ofM) totalPages = parseInt(ofM[1].replace(/,/g, ''), 10) || 1;
+        else {
+          const pageRe = /\/page\/(\d+)\//g;
+          let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
+          totalPages = pageNums.length ? Math.max(...pageNums) : 1;
+        }
       } else {
         // javhdz, sexbjcam: /page/N/ trong href
         const pageRe = /\/page\/(\d+)\/"[^>]*>(\d+)<\/a>/g;
@@ -772,7 +842,9 @@ const server = http.createServer(async (req, res) => {
 
       const title = (html.match(/<h1 class="page-title[^"]*"[^>]*>([\s\S]*?)<\/h1>/) ||
                      html.match(/<h1 class="header-title"><a[^>]*>([^<]+)<\/a><\/h1>/) ||
-                     html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/))?.[1].replace(/<[^>]+>/g, '').trim() || 'Unknown';
+                     html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) ||
+                     html.match(/<meta property="og:title" content="([^"]+)"/) ||
+                     html.match(/<title>([^<]+)<\/title>/))?.[1].replace(/<[^>]+>/g, '').replace(/\s*-\s*Viet69\s*$/i, '').trim() || 'Unknown';
 
       let videoId = (html.match(/id="video"\s+data-id="(\d+)"/) || html.match(/server\((\d+)/))?.[1] || null;
       if (site === 'quatvn' && !videoId) {
@@ -783,11 +855,15 @@ const server = http.createServer(async (req, res) => {
       let description = '';
       if (site === 'vlxx') { const d = html.match(/<div class="video-description">([\s\S]*?)<\/div>/); description = d ? d[1] : ''; }
       else if (site === 'quatvn') { const d = html.match(/<div class="entry-content[^"]*">([\s\S]*?)<\/div>/); description = d ? d[1] : ''; }
+      else if (site === 'viet69') {
+        const d = html.match(/<div class="entry-content[^"]*">([\s\S]*?)(?:<div class="entry-tags"|<div class="entry-actions")/);
+        description = d ? d[1].replace(/<div class="movieLoader"[\s\S]*?<\/div>/, '').replace(/<div class="video-actions[\s\S]*$/,'') : '';
+      }
       else { const d = html.match(/<article class="block-movie-content"[^>]*>([\s\S]*?)<\/article>/); description = d ? d[1] : ''; }
       description = description.replace(/<(?!\/?img(?=>|\s)[^>]*>)[^>]+>/g, '').trim();
 
       let thumbnail = html.match(/<meta property="og:image" content="([^"]+)"/)?.[1] || '';
-      if (!thumbnail && site !== 'vlxx' && site !== 'quatvn') thumbnail = html.match(/class="thumb" src="([^"]+)"/)?.[1] || '';
+      if (!thumbnail && site !== 'vlxx' && site !== 'quatvn' && site !== 'viet69') thumbnail = html.match(/class="thumb" src="([^"]+)"/)?.[1] || '';
       if (site === 'quatvn' && !thumbnail) {
         const dm = html.match(/data-item="([^"]+)"/);
         if (dm) try { const di = JSON.parse(dm[1].replace(/&quot;/g, '"')); if (di.splash) thumbnail = di.splash; } catch {}
@@ -804,6 +880,10 @@ const server = http.createServer(async (req, res) => {
       } else if (site === 'quatvn') {
         const tr = /<a href="[^"]*\/tag\/([^"\/]+)\/"[\s\S]*?>([^<]+)<\/a>/g; let m;
         while ((m = tr.exec(html))) tags.push({ slug: m[1], name: m[2].trim() });
+      } else if (site === 'viet69') {
+        const tagBlock = html.match(/<div class="entry-tags"[^>]*>([\s\S]*?)<\/div>/)?.[1] || '';
+        const tr = /href=['"]https?:\/\/viet69\.be\/tag\/([^'"\/]+)\/['"][^>]*>([^<]+)<\/a>/g; let m;
+        while ((m = tr.exec(tagBlock || html))) tags.push({ slug: m[1], name: m[2].trim() });
       } else {
         const tr = /<a class="tag-link" href="\/tag\/([^"]+)\/" title="([^"]+)">/g; let m;
         while ((m = tr.exec(html))) tags.push({ slug: m[1], name: m[2] });
@@ -873,6 +953,96 @@ const server = http.createServer(async (req, res) => {
               : `/api/proxy/mp4?url=${encodeURIComponent(item.sources[0].src)}&site=${site}`,
             thumbnail: item.splash || thumbnail, videoId: item.id?.toString() || null
           }));
+        }
+      }
+
+      // --- VIET69 ---
+      if (site === 'viet69') {
+        // movie_id = base64(UUID); multi-server via video2-btn
+        const serverList = [];
+        const btnTags = html.match(/<button[^>]*class="[^"]*video2-btn[^"]*"[^>]*>/g) || [];
+        for (const tag of btnTags) {
+          const type = tag.match(/data-type="(\d+)"/)?.[1];
+          const vid = tag.match(/data-video="([^"]+)"/)?.[1];
+          if (type && vid) serverList.push({ type, movieId: vid });
+        }
+        if (!serverList.length) {
+          const mid = html.match(/class="movieLoader"[^>]*data-movie="([^"]+)"/)?.[1]
+            || html.match(/data-movie="([^"]+)"[^>]*class="[^"]*movieLoader/)?.[1];
+          const typ = html.match(/class="movieLoader"[^>]*data-type="([^"]+)"/)?.[1]
+            || html.match(/data-type="([^"]+)"[^>]*class="[^"]*movieLoader/)?.[1]
+            || '25';
+          if (mid) serverList.push({ type: typ, movieId: mid });
+        }
+
+        const decodeUuid = async (movieId, type) => {
+          try {
+            const u = Buffer.from(movieId, 'base64').toString('utf8');
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(u)) return u;
+          } catch {}
+          // fallback: POST get.video.php → iframe emb.cd-vs.com/embed/UUID
+          try {
+            const postData = `movie_id=${encodeURIComponent(movieId)}&type=${encodeURIComponent(type || '25')}&index=1`;
+            const body = await new Promise((resolve) => {
+              const req = https.request('https://viet69.be/get.video.php', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Content-Length': Buffer.byteLength(postData),
+                  'Referer': url,
+                  'Origin': 'https://viet69.be',
+                  'User-Agent': UA
+                },
+                agent: AGENTS.https,
+                rejectUnauthorized: false
+              }, r => {
+                const chunks = [];
+                r.on('data', c => chunks.push(c));
+                r.on('end', () => resolve(Buffer.concat(chunks).toString()));
+              });
+              req.on('error', () => resolve(''));
+              req.write(postData);
+              req.end();
+            });
+            const emb = body.match(/emb\.cd-vs\.com\/embed\/([0-9a-f-]{36})/i);
+            if (emb) return emb[1];
+          } catch {}
+          return null;
+        };
+
+        let fallbackNonHls = null;
+        for (let i = 0; i < serverList.length; i++) {
+          const srv = serverList[i];
+          try {
+            const uuid = await decodeUuid(srv.movieId, srv.type);
+            if (!uuid) continue;
+            const apiUrl = `https://emb.cd-vs.com/api/get-video?id=${uuid}&counter=0&tried_ids=`;
+            const body = await fetchText(apiUrl, `https://emb.cd-vs.com/embed/${uuid}`);
+            let j; try { j = JSON.parse(body); } catch { continue; }
+            const candidates = [];
+            if (j.url) candidates.push(j.url);
+            if (Array.isArray(j.urls)) candidates.push(...j.urls);
+            const hls = candidates.find(u => typeof u === 'string' && u.includes('.m3u8'));
+            if (hls) {
+              streamUrl = hls;
+              proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(hls)}&s=viet69`;
+              console.log(`[Viet69] HLS server#${i + 1}: ${hls.slice(0, 80)}`);
+              break;
+            }
+            if (!fallbackNonHls && candidates[0]) fallbackNonHls = candidates[0];
+          } catch (e) {
+            console.log(`[Viet69] server#${i + 1} err: ${e.message}`);
+          }
+        }
+        if (!streamUrl && fallbackNonHls) {
+          streamUrl = fallbackNonHls;
+          if (streamUrl.includes('.m3u8')) {
+            proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=viet69`;
+          } else {
+            // blogger / other — pass through; player may not play
+            proxiedStreamUrl = streamUrl;
+            console.log(`[Viet69] Non-HLS fallback: ${streamUrl.slice(0, 80)}`);
+          }
         }
       }
 
@@ -1044,6 +1214,13 @@ const server = http.createServer(async (req, res) => {
         while ((m = sr.exec(html))) if (parseInt(m[1]) !== 1) servers.push({ id: parseInt(m[1]), name: m[2] });
       } else if (site === 'quatvn') {
         servers.push({ id: 1, name: 'Server 1' });
+      } else if (site === 'viet69') {
+        const btnTags = html.match(/<button[^>]*class="[^"]*video2-btn[^"]*"[^>]*>[^<]*/g) || [];
+        btnTags.forEach((tag, i) => {
+          const name = (tag.match(/>([^<]*)$/)?.[1] || `Server #${i + 1}`).trim();
+          servers.push({ id: i + 1, name: name || `Server #${i + 1}` });
+        });
+        if (!servers.length) servers.push({ id: 1, name: 'Server 1' });
       }
 
       // Tự động search sukebei cho javhdz
@@ -1374,7 +1551,8 @@ const server = http.createServer(async (req, res) => {
     } else if (pathname === '/api/proxy/pl.m3u8') {
       const targetUrl = parsed.searchParams.get('url');
       if (!targetUrl) { res.writeHead(400); return res.end('Missing url'); }
-      const raw = await fetchText(targetUrl, HOST + '/');
+      const proxyRef = proxyRefererFor(targetUrl, site, HOST);
+      const raw = await fetchText(targetUrl, proxyRef);
       const base = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
       const isMaster = raw.includes('#EXT-X-STREAM-INF');
       const outLines = [];
@@ -1399,7 +1577,7 @@ const server = http.createServer(async (req, res) => {
           if (!t || t.startsWith('#')) continue;
           urls.push(t.startsWith('http') ? t : (t.startsWith('/') ? new URL(targetUrl).origin + t : base + t));
         }
-        if (urls.length) { prefetchToEnd(urls, 0, HOST, targetUrl); console.log(`[PREFETCH] ${urls.length} segments`); }
+        if (urls.length) { prefetchToEnd(urls, 0, proxyRef.replace(/\/$/, ''), targetUrl); console.log(`[PREFETCH] ${urls.length} segments`); }
       }
 
     // ==================== PROXY: SEGMENT ====================
@@ -1409,12 +1587,13 @@ const server = http.createServer(async (req, res) => {
       const plUrl = parsed.searchParams.get('pl');
       const site = parsed.searchParams.get('s');
       const host = site ? getHost(site) : HOST;
+      const proxyRefHost = proxyRefererFor(targetUrl, site, host).replace(/\/$/, '');
       let buf = cacheGet(targetUrl);
       const hit = !!buf;
-      if (!buf) { buf = await fetchAndCacheSegment(targetUrl, host); if (!buf) { res.writeHead(502); return res.end('Fetch failed'); } }
+      if (!buf) { buf = await fetchAndCacheSegment(targetUrl, proxyRefHost); if (!buf) { res.writeHead(502); return res.end('Fetch failed'); } }
       res.writeHead(200, { 'Content-Type': 'video/MP2T', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' });
       res.end(buf);
-      if (hit && plUrl) getPlaylistSegments(plUrl, host).then(u => { const i = u.indexOf(targetUrl); if (i !== -1) prefetchToEnd(u, i, host, plUrl); }).catch(() => {});
+      if (hit && plUrl) getPlaylistSegments(plUrl, proxyRefHost).then(u => { const i = u.indexOf(targetUrl); if (i !== -1) prefetchToEnd(u, i, proxyRefHost, plUrl); }).catch(() => {});
 
     // ==================== API: XÓA CACHE THEO PLAYLIST ====================
     } else if (pathname === '/api/clear-cache') {
@@ -1698,7 +1877,7 @@ const server = http.createServer(async (req, res) => {
               let favs = loadFavorites();
               const key = data.site + ':' + data.path;
               const idx = favs.findIndex(f => f.key === key);
-              if (idx > -1) { favs.splice(idx, 1); } else { favs.push({ key, site: data.site, path: data.path, title: data.title, thumbnail: data.thumbnail }); }
+              if (idx > -1) { favs.splice(idx, 1); } else { favs.push({ key, site: data.site, path: data.path, title: data.title, thumbnail: data.thumbnail || '', childIdx: data.childIdx, parentPath: data.parentPath }); }
               saveFavorites(favs);
               return sendJSON(res, { success: true, favorited: idx === -1, count: favs.length });
             }

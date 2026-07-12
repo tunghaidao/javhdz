@@ -100,6 +100,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (part) { switchPart(part); return; }
     const close = e.target.closest('.player-close');
     if (close) { closePlayer(); return; }
+    const childFav = e.target.closest('.child-fav-btn');
+    if (childFav) {
+      toggleChildFavorite(parseInt(childFav.dataset.cidx), childFav.dataset.ctitle, childFav.dataset.cpath, childFav.dataset.csite);
+      return;
+    }
     const dlBtn = e.target.closest('.dl-btn');
     if (dlBtn) { if (dlBtn.dataset.url) downloadCached(dlBtn.dataset.url); return; }
     // Click hero banner → phát video đầu
@@ -330,14 +335,42 @@ async function toggleFavorite(video, optSite) {
   const site = optSite || currentSite;
   const key = site + ':' + video.path;
   const idx = serverFavs.findIndex(f => f.key === key);
-  if (idx > -1) { serverFavs.splice(idx, 1); } else { serverFavs.push({ key, site, path: video.path, title: video.title, thumbnail: video.thumbnail }); }
+  const hashIdx = video.path.indexOf('#idx=');
+  const extra = hashIdx !== -1 ? { childIdx: parseInt(video.path.substring(hashIdx + 5)) || -1, parentPath: video.path.substring(0, hashIdx) } : {};
+  if (idx > -1) { serverFavs.splice(idx, 1); } else { serverFavs.push({ key, site, path: video.path, title: video.title, thumbnail: video.thumbnail, ...extra }); }
   updateFavNav();
-  renderRows(allVideos);
+  renderGrid(allVideos);
   try {
     await fetch('/api/favorites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'toggle', site, path: video.path, title: video.title, thumbnail: video.thumbnail })
+      body: JSON.stringify({ action: 'toggle', site, path: video.path, title: video.title, thumbnail: video.thumbnail, ...extra })
+    });
+  } catch {}
+}
+
+async function toggleChildFavorite(idx, title, parentPath, site) {
+  const key = site + ':' + parentPath + '#idx=' + idx;
+  const path = parentPath + '#idx=' + idx;
+  const favIdx = serverFavs.findIndex(f => f.key === key);
+  if (favIdx > -1) {
+    serverFavs.splice(favIdx, 1);
+  } else {
+    serverFavs.push({ key, site, path, title, thumbnail: '', childIdx: idx, parentPath });
+  }
+  updateFavNav();
+  // Refresh ♡ states in playlist
+  document.querySelectorAll('.child-fav-btn').forEach(el => {
+    const ek = site + ':' + el.dataset.cpath + '#idx=' + el.dataset.cidx;
+    const isFav = serverFavs.some(f => f.key === ek);
+    el.style.color = isFav ? '#e50914' : '#555';
+    el.textContent = isFav ? '♥' : '♡';
+  });
+  try {
+    await fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'toggle', site, path, title, thumbnail: '' })
     });
   } catch {}
 }
@@ -364,7 +397,7 @@ function showFavorites() {
   document.getElementById('favNavLink').style.color = '#fff';
   const vids = favs.map(f => ({ title: f.title, path: f.path, thumbnail: f.thumbnail, views: '♥', _site: f.site }));
   allVideos = vids;
-  renderRows(vids);
+  renderGrid(vids);
 }
 
 async function openPlayer(video, optSite) {
@@ -375,7 +408,13 @@ async function openPlayer(video, optSite) {
   const playerWrap = document.getElementById('playerWrap');
   playerWrap.innerHTML = '<div class="loading-screen" style="padding:40px 0"><div class="spinner"></div><p>Dang tai video...</p></div>';
 
-  const path = video.path || '';
+  // Extract child index from path (e.g. /creators/foo#idx=2)
+  let childIdx = -1;
+  const rawPath = video.path || '';
+  const hashIdx = rawPath.indexOf('#idx=');
+  const path = hashIdx !== -1 ? rawPath.substring(0, hashIdx) : rawPath;
+  if (hashIdx !== -1) childIdx = parseInt(rawPath.substring(hashIdx + 5)) || -1;
+
   const detail = await apiFetch(`/api/video-detail?path=${encodeURIComponent(path)}&site=${site}`);
   if (!detail.success) { playerWrap.innerHTML = '<div class="loading-screen"><p style="color:#e50914">Khong the tai video.</p></div>'; return; }
 
@@ -419,7 +458,7 @@ async function openPlayer(video, optSite) {
   window._lastVideoPath = video.path || '';
   window._lastSite = site;
   if (streamUrl) {
-    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com' };
+    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com', viet69:'viet69.be', '18tube':'18tube.my' };
     const host = hostMap[site] || 'javhdz.ws';
     // Dùng stream URL gốc (CDN) thay vì proxy — yt-dlp xử lý Cloudflare tốt
     const baseUrl = window.location.origin;
@@ -477,10 +516,19 @@ async function openPlayer(video, optSite) {
     plHtml += '<div style="font-size:13px;color:#999;margin-bottom:6px">📋 Danh sach phan</div><div style="display:flex;gap:6px;flex-wrap:wrap">';
     for (const p of playlist) {
       const active = p.index === 0 ? 'background:var(--accent);color:#fff' : 'background:var(--surface2);color:var(--text)';
+      const childKey = site + ':' + video.path + '#idx=' + p.index;
+      const isChildFav = getFavorites().some(f => f.key === childKey);
       plHtml += `<span class="player-part" data-idx="${p.index}" data-url="${p.proxiedStreamUrl || p.streamUrl}" data-title="${escHtml(p.title)}" style="cursor:pointer;padding:4px 12px;border-radius:12px;font-size:12px;${active}" onclick="event.stopPropagation();switchPart(this)">${escHtml(p.title)}</span>`;
+      plHtml += `<span class="child-fav-btn" data-cidx="${p.index}" data-ctitle="${escHtml(p.title)}" data-cpath="${escHtml(video.path)}" data-csite="${site}" style="cursor:pointer;font-size:14px;${isChildFav?'color:#e50914':'color:#ccc'};margin:0 4px 0 2px;vertical-align:middle;text-shadow:0 1px 4px rgba(0,0,0,.8)">${isChildFav?'♥':'♡'}</span>`;
     }
     plHtml += '</div></div>';
     document.getElementById('playerTags').insertAdjacentHTML('afterend', plHtml);
+  }
+
+  // Auto-switch to child part if opened from favorites
+  if (childIdx >= 0) {
+    const target = document.querySelector(`.player-part[data-idx="${childIdx}"]`);
+    if (target) setTimeout(() => switchPart(target), 100);
   }
 
   // Load video player
@@ -752,7 +800,7 @@ function downloadCached(encodedUrl) {
   const dlSite = btn ? (btn.dataset.site || currentSite) : currentSite;
 
   // Lấy stream URL gốc + tạo lệnh yt-dlp
-  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
+  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : dlSite === 'viet69' ? 'viet69.be' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
   
   // Copy vào clipboard
   if (navigator.clipboard && navigator.clipboard.writeText) {

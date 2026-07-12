@@ -9,3 +9,5 @@ __pycache__/
 .javtiful_cookies.txt
 .local/
 favorites.json
+*.mp4
+PLAN.md

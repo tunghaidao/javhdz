@@ -458,7 +458,7 @@ async function openPlayer(video, optSite) {
   window._lastVideoPath = video.path || '';
   window._lastSite = site;
   if (streamUrl) {
-    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com', viet69:'viet69.be', pornhub:'www.pornhub.com', kkphim:'kkphim.com', '18tube':'18tube.my' };
+    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com', viet69:'viet69.be', pornhub:'www.pornhub.com', kkphim:'kkphim.com', nguonc:'phim.nguonc.com', xchina:'3xchina.page', '18tube':'18tube.my' };
     const host = hostMap[site] || 'javhdz.ws';
     // Dùng stream URL gốc (CDN) thay vì proxy — yt-dlp xử lý Cloudflare tốt
     const baseUrl = window.location.origin;
@@ -533,6 +533,18 @@ async function openPlayer(video, optSite) {
 
   // Load video player
   const hlsUrl = detail.proxiedStreamUrl || detail.streamUrl;
+  const useEmbed = detail.playMode === 'embed'
+    || (site === 'nguonc' && detail.embedUrl)
+    || (site === 'nguonc' && hlsUrl && /streamc\.xyz\/embed\.php/i.test(hlsUrl));
+  if (useEmbed) {
+    const emb = detail.embedUrl || hlsUrl;
+    playerWrap.innerHTML = `<iframe src="${escHtml(emb)}" style="width:100%;height:100%;position:absolute;top:0;left:0;border:none" allowfullscreen allow="autoplay; fullscreen; encrypted-media"></iframe>`;
+    const badge = document.createElement('span');
+    badge.style.cssText = 'position:absolute;top:8px;right:8px;z-index:10;background:rgba(0,0,0,.7);color:#e50914;font-size:11px;font-weight:600;padding:3px 8px;border-radius:4px';
+    badge.textContent = 'EMBED';
+    playerWrap.appendChild(badge);
+    return;
+  }
   if (!hlsUrl) {
     if (site === 'sexbjcam') {
       playerWrap.innerHTML = `<iframe src="https://sexbjcam.com${video.path}" style="width:100%;height:100%;position:absolute;top:0;left:0;border:none" allowfullscreen></iframe>`;
@@ -549,12 +561,213 @@ async function openPlayer(video, optSite) {
   }
 
   currentVideoPath = video.path || '';
-  loadVideoSource(hlsUrl, site, currentVideoPath, playerWrap);
+  window._playerPoster = detail.thumbnail || video.thumbnail || '';
+  window._playerVtt = detail.proxiedVtt || '';
+  window._lastStreamUrl = detail.streamUrl || streamUrl || '';
+  loadVideoSource(hlsUrl, site, currentVideoPath, playerWrap, {
+    poster: window._playerPoster,
+    vtt: window._playerVtt,
+    streamUrl: window._lastStreamUrl,
+    site
+  });
 }
 
-function loadVideoSource(url, site, path, playerWrap) {
-  playerWrap.innerHTML = '<video id="videoPlayer" controls autoplay playsinline></video>';
+function parseVttTime(s) {
+  const p = String(s || '').trim().split(':');
+  if (p.length < 2) return 0;
+  const sec = parseFloat(p[p.length - 1]) || 0;
+  const min = parseInt(p[p.length - 2], 10) || 0;
+  const hr = p.length > 2 ? (parseInt(p[p.length - 3], 10) || 0) : 0;
+  return hr * 3600 + min * 60 + sec;
+}
+
+function parseVttCues(text) {
+  const cues = [];
+  if (!text) return cues;
+  const blocks = text.replace(/\r/g, '').split(/\n\n+/);
+  for (const block of blocks) {
+    const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length || lines[0].startsWith('WEBVTT')) continue;
+    const timeLine = lines.find(l => l.includes('-->'));
+    if (!timeLine) continue;
+    const [a, b] = timeLine.split('-->').map(x => x.trim().split(/\s+/)[0]);
+    const payload = lines.filter(l => l !== timeLine && !/^\d+$/.test(l)).join('');
+    if (!payload) continue;
+    const hashIdx = payload.indexOf('#');
+    const url = hashIdx >= 0 ? payload.slice(0, hashIdx) : payload;
+    let xywh = null;
+    if (hashIdx >= 0 && /xywh=/i.test(payload)) {
+      const m = payload.match(/xywh=(\d+),(\d+),(\d+),(\d+)/i);
+      if (m) xywh = { x: +m[1], y: +m[2], w: +m[3], h: +m[4] };
+    }
+    cues.push({ start: parseVttTime(a), end: parseVttTime(b), url, xywh });
+  }
+  return cues;
+}
+
+function formatSeekTime(t) {
+  t = Math.max(0, Math.floor(t || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function cueAt(cues, t) {
+  if (!cues?.length) return null;
+  for (const c of cues) {
+    if (t >= c.start && t < c.end) return c;
+  }
+  // nearest earlier
+  let best = null;
+  for (const c of cues) {
+    if (c.start <= t) best = c;
+    else break;
+  }
+  return best || cues[0];
+}
+
+function setupSeekPreview(videoEl, playerWrap, opts = {}) {
+  const poster = opts.poster || '';
+  const vttUrl = opts.vtt || '';
+  const streamUrl = opts.streamUrl || '';
+  const site = opts.site || currentSite || 'javhdz';
+  let cues = [];
+  let lastBucket = -1;
+  let hoverTimer = null;
+
+  // remove old
+  playerWrap.querySelectorAll('.seek-rail, .seek-preview').forEach(n => n.remove());
+
+  const rail = document.createElement('div');
+  rail.className = 'seek-rail';
+  rail.innerHTML = '<div class="seek-rail-track"><div class="seek-rail-fill" id="seekRailFill"></div></div>';
+  const preview = document.createElement('div');
+  preview.className = 'seek-preview';
+  preview.id = 'seekPreview';
+  preview.innerHTML = `
+    <div class="seek-preview-img-wrap" id="seekPreviewWrap">
+      <img id="seekPreviewImg" alt="" ${poster ? `src="${escHtml(poster)}"` : ''}>
+    </div>
+    <div class="seek-preview-time" id="seekPreviewTime">00:00</div>`;
+  playerWrap.appendChild(rail);
+  playerWrap.appendChild(preview);
+
+  const fill = rail.querySelector('#seekRailFill');
+  const img = preview.querySelector('#seekPreviewImg');
+  const wrap = preview.querySelector('#seekPreviewWrap');
+  const timeEl = preview.querySelector('#seekPreviewTime');
+
+  if (vttUrl) {
+    fetch(vttUrl).then(r => r.text()).then(t => { cues = parseVttCues(t); }).catch(() => {});
+  }
+
+  const showPosterFrame = () => {
+    wrap.classList.remove('sprite');
+    img.style.cssText = '';
+    wrap.style.width = '160px';
+    wrap.style.height = '90px';
+    if (poster && img.getAttribute('src') !== poster) img.src = poster;
+  };
+
+  const applyCue = (t) => {
+    const cue = cueAt(cues, t);
+    if (cue?.url) {
+      if (img.getAttribute('data-cue') !== cue.url + (cue.xywh ? JSON.stringify(cue.xywh) : '')) {
+        img.setAttribute('data-cue', cue.url + (cue.xywh ? JSON.stringify(cue.xywh) : ''));
+        img.src = cue.url;
+      }
+      if (cue.xywh) {
+        wrap.classList.add('sprite');
+        img.style.width = 'auto';
+        img.style.height = 'auto';
+        img.style.maxWidth = 'none';
+        img.style.transform = `translate(${-cue.xywh.x}px,${-cue.xywh.y}px)`;
+        wrap.style.width = cue.xywh.w + 'px';
+        wrap.style.height = cue.xywh.h + 'px';
+      } else {
+        wrap.classList.remove('sprite');
+        img.style.cssText = '';
+        wrap.style.width = '160px';
+        wrap.style.height = '90px';
+      }
+      return;
+    }
+
+    // No VTT: request ffmpeg frame for this time bucket (all sites)
+    if (!streamUrl) {
+      showPosterFrame();
+      return;
+    }
+    const bucket = Math.floor(Math.max(0, t) / 5) * 5;
+    if (bucket === lastBucket && img.getAttribute('data-bucket') === String(bucket)) return;
+    lastBucket = bucket;
+    // keep last frame while loading; first time show poster
+    if (!img.getAttribute('data-bucket') && poster) showPosterFrame();
+    const api = `/api/thumb-preview?url=${encodeURIComponent(streamUrl)}&t=${bucket}&s=${encodeURIComponent(site)}`;
+    // debounce network a bit under rapid mouse move
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      const probe = new Image();
+      probe.onload = () => {
+        wrap.classList.remove('sprite');
+        img.style.cssText = '';
+        wrap.style.width = '160px';
+        wrap.style.height = '90px';
+        img.src = api;
+        img.setAttribute('data-bucket', String(bucket));
+        img.removeAttribute('data-cue');
+      };
+      probe.onerror = () => { /* keep poster/last frame */ };
+      probe.src = api;
+    }, 80);
+  };
+
+  const posFromEvent = (e) => {
+    const rect = rail.getBoundingClientRect();
+    const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width);
+    const ratio = rect.width ? x / rect.width : 0;
+    const dur = videoEl.duration || 0;
+    return { x, ratio, time: dur * ratio };
+  };
+
+  rail.addEventListener('mousemove', (e) => {
+    const { x, time } = posFromEvent(e);
+    preview.classList.add('show');
+    preview.style.left = Math.min(Math.max(x, 80), rail.clientWidth - 80) + 'px';
+    timeEl.textContent = formatSeekTime(time);
+    applyCue(time);
+  });
+  rail.addEventListener('mouseleave', () => {
+    preview.classList.remove('show');
+    clearTimeout(hoverTimer);
+  });
+  rail.addEventListener('click', (e) => {
+    const { time } = posFromEvent(e);
+    if (Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
+      videoEl.currentTime = time;
+    }
+  });
+
+  const syncFill = () => {
+    if (!fill || !videoEl.duration) return;
+    fill.style.width = ((videoEl.currentTime / videoEl.duration) * 100) + '%';
+  };
+  videoEl.addEventListener('timeupdate', syncFill);
+  videoEl.addEventListener('loadedmetadata', syncFill);
+  videoEl.addEventListener('seeked', syncFill);
+}
+
+function loadVideoSource(url, site, path, playerWrap, opts = {}) {
+  const poster = opts.poster || window._playerPoster || '';
+  const vtt = opts.vtt || window._playerVtt || '';
+  const streamUrl = opts.streamUrl || window._lastStreamUrl || '';
+  const posterAttr = poster ? ` poster="${escHtml(poster)}"` : '';
+  playerWrap.innerHTML = `<video id="videoPlayer" controls autoplay playsinline${posterAttr}></video>`;
   const videoEl = document.getElementById('videoPlayer');
+  setupSeekPreview(videoEl, playerWrap, { poster, vtt, streamUrl, site });
 
   // Resume
   const resumeKey = 'resume:' + site + ':' + path;
@@ -612,7 +825,17 @@ function switchPart(el) {
   const url = el.dataset.url;
   if (!url) return;
   document.getElementById('playerTitle').textContent = el.dataset.title || 'Dang phat...';
-  loadVideoSource(url, currentSite, currentVideoPath, document.getElementById('playerWrap'));
+  const wrap = document.getElementById('playerWrap');
+  if (/streamc\.xyz\/embed\.php/i.test(url) || currentSite === 'nguonc' && !/\.m3u8|proxy\/pl/i.test(url)) {
+    wrap.innerHTML = `<iframe src="${escHtml(url)}" style="width:100%;height:100%;position:absolute;top:0;left:0;border:none" allowfullscreen allow="autoplay; fullscreen; encrypted-media"></iframe>`;
+    return;
+  }
+  loadVideoSource(url, currentSite, currentVideoPath, wrap, {
+    poster: window._playerPoster || '',
+    vtt: window._playerVtt || '',
+    streamUrl: window._lastStreamUrl || el.dataset.stream || '',
+    site: currentSite
+  });
 }
 
 function showClipDialog() {
@@ -800,7 +1023,7 @@ function downloadCached(encodedUrl) {
   const dlSite = btn ? (btn.dataset.site || currentSite) : currentSite;
 
   // Lấy stream URL gốc + tạo lệnh yt-dlp
-  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : dlSite === 'viet69' ? 'viet69.be' : dlSite === 'pornhub' ? 'www.pornhub.com' : dlSite === 'kkphim' ? 'kkphim.com' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
+  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : dlSite === 'viet69' ? 'viet69.be' : dlSite === 'pornhub' ? 'www.pornhub.com' : dlSite === 'kkphim' ? 'kkphim.com' : dlSite === 'nguonc' ? 'phim.nguonc.com' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
   
   // Copy vào clipboard
   if (navigator.clipboard && navigator.clipboard.writeText) {

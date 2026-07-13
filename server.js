@@ -81,6 +81,9 @@ const PLAYLIST_TTL = 5 * 60 * 1000;
 const PREFETCH_CONCURRENCY = 6;
 
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+const THUMB_DIR = path.join(CACHE_DIR, 'thumbs');
+if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR, { recursive: true });
+const thumbInflight = new Map(); // key -> Promise<Buffer>
 
 const playlistCache = new Map();
 const fetchPromises = new Map();
@@ -333,17 +336,73 @@ const SITES = {
   viet69: { base: 'https://viet69.be' },
   pornhub: { base: 'https://www.pornhub.com' },
   kkphim: { base: 'https://kkphim.com' },
+  nguonc: { base: 'https://phim.nguonc.com' },
+  xchina: { base: 'https://3xchina.page' },
 };
 
-/** Referer cho proxy stream — CDN viet69 / Pornhub / KKPhim */
+/** Referer cho proxy stream — CDN viet69 / Pornhub / KKPhim / NguonC / 3xChina */
 function proxyRefererFor(url, site, host) {
   if (site === 'viet69' || /cd-vs\.com/i.test(url || '')) return 'https://emb.cd-vs.com/';
   if (site === 'pornhub' || /phncdn\.com/i.test(url || '')) return 'https://www.pornhub.com/';
   if (site === 'kkphim' || /kkphimplayer|phimapi\.com/i.test(url || '')) return 'https://kkphim.com/';
+  if (site === 'nguonc' || /streamc\.xyz|phimmoi\.net/i.test(url || '')) return 'https://phim.nguonc.com/';
+  if (site === 'xchina' || /cdn-centaurus|lakesidecreative|huntrexus|hanerix|audinifer|vibuxer|masukestin|hglink|hgcloud|streamhg/i.test(url || '')) {
+    return 'https://hanerix.com/';
+  }
   return (host || getHost(site || 'javhdz')) + '/';
 }
 
 function getHost(site) { return SITES[site]?.base || SITES.javhdz.base; }
+
+/** Dean Edwards packer unpack (StreamHG / hglink embed) */
+function unpackDeanEdwards(html) {
+  const m = html.match(/eval\(function\(p,a,c,k,e,d\)\{while\(c--\)[\s\S]{0,200}?return p\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
+  if (!m) return '';
+  const p = m[1];
+  const a = parseInt(m[2], 10);
+  const c = parseInt(m[3], 10);
+  const k = m[4].split('|');
+  return p.replace(/\b\w+\b/g, (tok) => {
+    try {
+      const n = parseInt(tok, a);
+      if (!Number.isNaN(n) && n < k.length && k[n]) return k[n];
+    } catch {}
+    return tok;
+  });
+}
+
+/** Resolve hglink.to embed → absolute master.m3u8 */
+async function resolveHglinkM3u8(embedUrl) {
+  const idM = String(embedUrl).match(/\/e\/([a-z0-9]+)/i);
+  const id = idM ? idM[1] : null;
+  if (!id) return null;
+  const hosts = ['hanerix.com', 'audinifer.com', 'vibuxer.com', 'masukestin.com'];
+  let embHtml = '';
+  let okHost = '';
+  for (const h of hosts) {
+    try {
+      const u = `https://${h}/e/${id}`;
+      embHtml = await fetchText(u, 'https://3xchina.page/');
+      if (embHtml && embHtml.length > 2000 && /eval\(function\(p,a,c,k/.test(embHtml)) {
+        okHost = h;
+        break;
+      }
+    } catch {}
+  }
+  if (!embHtml) return null;
+  const unpacked = unpackDeanEdwards(embHtml);
+  // prefer absolute hls2 then any absolute m3u8
+  let m3 =
+    (unpacked.match(/"hls2"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i) || [])[1] ||
+    (unpacked.match(/"hls4"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i) || [])[1] ||
+    (unpacked.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i) || [])[1];
+  if (!m3) {
+    // relative hls4 → absolutize on embed host
+    const rel = (unpacked.match(/"hls4"\s*:\s*"(\/[^"]+\.m3u8[^"]*)"/i) || [])[1];
+    if (rel && okHost) m3 = `https://${okHost}${rel}`;
+  }
+  return m3 || null;
+}
 
 // ============================================================
 // HELPERS
@@ -540,6 +599,31 @@ const server = http.createServer(async (req, res) => {
           const cat = category || 'phim-18';
           url = `${HOST}/the-loai/${cat}`;
           if (page > 1) url += `?page=${page}`;
+        }
+      } else if (site === 'nguonc') {
+        // Official JSON API (cleaner than HTML table)
+        if (search) {
+          url = `${HOST}/api/films/search?keyword=${encodeURIComponent(search)}`;
+          if (page > 1) url += `&page=${page}`;
+        } else {
+          const cat = category || 'phim-18';
+          url = `${HOST}/api/films/the-loai/${encodeURIComponent(cat)}`;
+          if (page > 1) url += `?page=${page}`;
+        }
+      } else if (site === 'xchina') {
+        if (search) {
+          url = `${HOST}/?s=${encodeURIComponent(search)}`;
+          if (page > 1) url = `${HOST}/page/${page}/?s=${encodeURIComponent(search)}`;
+        } else if (category) {
+          // category slug or tag:slug
+          if (category.startsWith('tag:')) {
+            const tag = category.slice(4);
+            url = page > 1 ? `${HOST}/tag/${tag}/page/${page}/` : `${HOST}/tag/${tag}/`;
+          } else {
+            url = page > 1 ? `${HOST}/category/${category}/page/${page}/` : `${HOST}/category/${category}/`;
+          }
+        } else {
+          url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
         }
       } else if (site === 'javtiful') {
         if (parsed.searchParams.get('url')) {
@@ -823,6 +907,60 @@ const server = http.createServer(async (req, res) => {
           { slug: 'co-trang', name: 'Cổ Trang' },
           { slug: 'vien-tuong', name: 'Viễn Tưởng' },
         ];
+      } else if (site === 'nguonc') {
+        let data = null;
+        try { data = JSON.parse(html); } catch {}
+        for (const it of data?.items || []) {
+          if (!it?.slug) continue;
+          videos.push({
+            title: (it.name || it.original_name || it.slug).trim(),
+            path: '/phim/' + it.slug,
+            thumbnail: it.poster_url || it.thumb_url || '',
+            views: it.current_episode || it.quality || it.time || 'N/A'
+          });
+        }
+        categories = [
+          { slug: 'phim-18', name: 'Phim 18+' },
+          { slug: 'kinh-di', name: 'Kinh Dị' },
+          { slug: 'hanh-dong', name: 'Hành Động' },
+          { slug: 'tinh-cam', name: 'Tình Cảm' },
+          { slug: 'phim-hai', name: 'Hài' },
+          { slug: 'tam-ly', name: 'Tâm Lý' },
+          { slug: 'lang-man', name: 'Lãng Mạn' },
+          { slug: 'chinh-kich', name: 'Chính Kịch' },
+        ];
+      } else if (site === 'xchina') {
+        const re = /<article[^>]*class="[^"]*loop-video[^"]*"[\s\S]*?<\/article>/gi;
+        let block;
+        while ((block = re.exec(html))) {
+          const b = block[0];
+          const hrefM = b.match(/href="(https?:\/\/3xchina\.page\/[^"]+\/)"/i) || b.match(/href="(\/[^"]+\/)"/i);
+          if (!hrefM) continue;
+          let p = hrefM[1];
+          if (p.startsWith('http')) {
+            try { p = new URL(p).pathname; } catch { continue; }
+          }
+          if (!p.startsWith('/')) p = '/' + p;
+          // skip pure category/tag listing links
+          if (/^\/(category|tag|actor|actors|page)\//i.test(p)) continue;
+          const titleM = b.match(/title="([^"]+)"/i) || b.match(/<span>([^<]+)<\/span>/i);
+          const imgM = b.match(/(?:data-src|src)="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i);
+          const viewsM = b.match(/class="views"[^>]*>[\s\S]*?<\/i>\s*([^<]+)/i);
+          videos.push({
+            title: (titleM ? titleM[1] : p.replace(/\//g, '')).replace(/&amp;/g, '&').trim(),
+            path: p,
+            thumbnail: imgM ? imgM[1] : '',
+            views: viewsM ? viewsM[1].trim() : 'N/A'
+          });
+        }
+        categories = [
+          { slug: 'chinese-av', name: 'Chinese AV' },
+          { slug: 'chinese-sex', name: 'Chinese Sex' },
+          { slug: 'tag:china-av', name: 'Tag: China AV' },
+          { slug: 'tag:md-series', name: 'Tag: MD' },
+          { slug: 'tag:91porn', name: 'Tag: 91Porn' },
+          { slug: 'tag:swag', name: 'Tag: SWAG' },
+        ];
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -890,6 +1028,16 @@ const server = http.createServer(async (req, res) => {
         if (/page-item[^>]*>\s*<a[^>]*rel="next"|aria-label="Next"|»|›/i.test(html) && totalPages <= page) {
           totalPages = page + 1;
         }
+      } else if (site === 'nguonc') {
+        try {
+          const data = JSON.parse(html);
+          totalPages = parseInt(data?.paginate?.total_page, 10) || 1;
+        } catch { totalPages = 1; }
+      } else if (site === 'xchina') {
+        const pageRe = /\/page\/(\d+)\//g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1], 10));
+        totalPages = pageNums.length ? Math.max(...pageNums) : 1;
+        if (/rel="next"/i.test(html) && totalPages <= page) totalPages = page + 1;
       } else {
         // javhdz, sexbjcam: /page/N/ trong href
         const pageRe = /\/page\/(\d+)\/"[^>]*>(\d+)<\/a>/g;
@@ -994,6 +1142,8 @@ const server = http.createServer(async (req, res) => {
                        .replace(/\s*-\s*Viet69\s*$/i, '')
                        .replace(/\s*-\s*Pornhub\.com\s*$/i, '')
                        .replace(/\s*-\s*KKPhim[\s\S]*$/i, '')
+                       .replace(/\s*-\s*NGUỒN PHIM\s*$/i, '')
+                       .replace(/\s*-\s*3xchina\.page\s*$/i, '')
                        .replace(/&amp;/g, '&').trim() || 'Unknown';
 
       let videoId = (html.match(/id="video"\s+data-id="(\d+)"/) || html.match(/server\((\d+)/))?.[1] || null;
@@ -1040,6 +1190,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       let streamUrl = null, proxiedStreamUrl = null, quatvnPlaylist = null;
+      let playMode = null, embedUrl = null;
 
       // --- VLXX ---
       if (site === 'vlxx' && videoId) {
@@ -1277,6 +1428,115 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // --- NGUONC ---
+      if (site === 'nguonc') {
+        const parseEpisodes = (h) => {
+          const m = h.match(/var\s+episodes\s*=\s*(\[[\s\S]*?\]);/);
+          if (!m) return [];
+          try { return JSON.parse(m[1]); } catch { return []; }
+        };
+        const hostAlive = async (u) => {
+          try {
+            const h = new URL(u).hostname;
+            await dns.promises.lookup(h);
+            return true;
+          } catch { return false; }
+        };
+        const serversJson = parseEpisodes(html);
+        const eps = [];
+        for (const srv of serversJson || []) {
+          const sname = srv.server_name || 'Server';
+          for (const ep of srv.list || srv.server_data || srv.items || []) {
+            const m3u8 = ep.m3u8 || ep.link_m3u8 || '';
+            const emb = ep.embed || '';
+            if ((m3u8 && String(m3u8).includes('.m3u8')) || emb) {
+              eps.push({
+                name: `${sname} · ${ep.name || ep.slug || 'Full'}`,
+                streamUrl: m3u8 || '',
+                embed: emb
+              });
+            }
+          }
+        }
+        // collect embed even if no m3u8 in loop
+        if (!eps.length) {
+          const emb = html.match(/https?:\/\/embed\d*\.streamc\.xyz\/embed\.php\?hash=[a-f0-9]+/i);
+          if (emb) eps.push({ name: 'Embed', streamUrl: '', embed: emb[0] });
+        }
+        if (eps.length) {
+          const first = eps[0];
+          let useHls = !!(first.streamUrl && first.streamUrl.includes('.m3u8'));
+          if (useHls && /sing\.phimmoi\.net/i.test(first.streamUrl)) useHls = false;
+          if (useHls) useHls = await hostAlive(first.streamUrl);
+          if (useHls) {
+            streamUrl = first.streamUrl;
+            proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=nguonc`;
+            if (eps.length > 1) {
+              quatvnPlaylist = eps.filter(e => e.streamUrl).map((ep, idx) => ({
+                index: idx,
+                title: ep.name,
+                streamUrl: ep.streamUrl,
+                proxiedStreamUrl: `/api/proxy/pl.m3u8?url=${encodeURIComponent(ep.streamUrl)}&s=nguonc`,
+                thumbnail: null,
+                videoId: null
+              }));
+            }
+            console.log(`[NguonC] HLS x${eps.length}: ${streamUrl.slice(0, 80)}`);
+          } else {
+            // CDN DNS dead → embed iframe (streamc player)
+            const emb = first.embed || eps.map(e => e.embed).find(Boolean) || '';
+            if (emb) {
+              streamUrl = emb;
+              proxiedStreamUrl = null;
+              embedUrl = emb;
+              playMode = 'embed';
+              if (eps.length > 1) {
+                quatvnPlaylist = eps.filter(e => e.embed).map((ep, idx) => ({
+                  index: idx,
+                  title: ep.name,
+                  streamUrl: ep.embed,
+                  proxiedStreamUrl: ep.embed,
+                  thumbnail: null,
+                  videoId: null,
+                  playMode: 'embed'
+                }));
+              }
+              console.log(`[NguonC] embed fallback: ${emb.slice(0, 80)}`);
+            }
+          }
+        }
+      }
+
+      // --- 3XCHINA (hglink / StreamHG) ---
+      if (site === 'xchina') {
+        const embM = html.match(/<IFRAME[^>]+SRC=["'](https?:\/\/hglink\.to\/e\/[a-z0-9]+)["']/i)
+          || html.match(/src=["'](https?:\/\/hglink\.to\/e\/[a-z0-9]+)["']/i)
+          || html.match(/(https?:\/\/hglink\.to\/e\/[a-z0-9]+)/i);
+        if (embM) {
+          const emb = embM[1];
+          try {
+            const m3 = await resolveHglinkM3u8(emb);
+            if (m3) {
+              streamUrl = m3;
+              proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=xchina`;
+              console.log(`[3xChina] HLS: ${streamUrl.slice(0, 90)}`);
+            } else {
+              // fallback: try final embed host iframe
+              streamUrl = emb.replace('hglink.to', 'hanerix.com');
+              proxiedStreamUrl = null;
+              embedUrl = streamUrl;
+              playMode = 'embed';
+              console.log(`[3xChina] embed fallback: ${streamUrl}`);
+            }
+          } catch (e) {
+            console.log(`[3xChina] resolve fail: ${e.message}`);
+            streamUrl = emb.replace('hglink.to', 'hanerix.com');
+            embedUrl = streamUrl;
+            playMode = 'embed';
+          }
+        }
+      }
+
       // --- SEXBJCAM ---
       if (site === 'sexbjcam') {
         const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
@@ -1456,6 +1716,10 @@ const server = http.createServer(async (req, res) => {
         servers.push({ id: 1, name: 'HLS' });
       } else if (site === 'kkphim') {
         servers.push({ id: 1, name: 'HLS' });
+      } else if (site === 'nguonc') {
+        servers.push({ id: 1, name: 'HLS' });
+      } else if (site === 'xchina') {
+        servers.push({ id: 1, name: 'HLS' });
       }
 
       // Tự động search sukebei cho javhdz
@@ -1490,7 +1754,7 @@ const server = http.createServer(async (req, res) => {
       const result = {
         success: true, videoId, title, description, thumbnail, tags, servers,
         streamUrl, proxiedStreamUrl, vttUrl, proxiedVtt, playlist: quatvnPlaylist,
-        torrent, javCode
+        torrent, javCode, playMode, embedUrl
       };
 
       // Lưu cache
@@ -1862,6 +2126,68 @@ const server = http.createServer(async (req, res) => {
         return `/api/proxy/image?url=${encodeURIComponent(abs)}&site=${site}` + (h ? '#' + h : '');
       }).join('\n'));
 
+    // ==================== THUMB PREVIEW (ffmpeg frame @ t) ====================
+    } else if (pathname === '/api/thumb-preview') {
+      const streamUrl = parsed.searchParams.get('url');
+      const tRaw = parseFloat(parsed.searchParams.get('t') || '0');
+      if (!streamUrl) { res.writeHead(400); return res.end('Missing url'); }
+      // bucket 5s to reuse frames
+      const t = Math.max(0, Math.floor((Number.isFinite(tRaw) ? tRaw : 0) / 5) * 5);
+      const key = crypto.createHash('md5').update(site + '|' + streamUrl + '|' + t).digest('hex');
+      const fp = path.join(THUMB_DIR, key + '.jpg');
+      try {
+        if (fs.existsSync(fp) && fs.statSync(fp).size > 200) {
+          res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Cache-Control': 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*'
+          });
+          return res.end(fs.readFileSync(fp));
+        }
+        let p = thumbInflight.get(key);
+        if (!p) {
+          p = (async () => {
+            const { execFile } = require('child_process');
+            const util = require('util');
+            const execFileAsync = util.promisify(execFile);
+            const isMp4 = /\.mp4(\?|$)/i.test(streamUrl) || streamUrl.includes('format=mp4');
+            const args = ['-hide_banner', '-loglevel', 'error'];
+            if (isMp4) {
+              // Direct CDN + referer (mp4 proxy advertises Accept-Ranges but doesn't serve Range)
+              const ref = proxyRefererFor(streamUrl, site, getHost(site || 'javhdz'));
+              args.push('-headers', `Referer: ${ref}\r\nUser-Agent: ${UA}\r\n`);
+              args.push('-ss', String(t), '-i', streamUrl);
+            } else {
+              // HLS via our playlist proxy (CDN referer handled there)
+              const input = `http://127.0.0.1:${PORT}/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=${encodeURIComponent(site || 'javhdz')}`;
+              args.push('-ss', String(t), '-i', input);
+            }
+            args.push(
+              '-frames:v', '1',
+              '-vf', 'scale=160:-2',
+              '-q:v', '5',
+              '-y', fp
+            );
+            await execFileAsync('ffmpeg', args, { timeout: 45000, maxBuffer: 2 * 1024 * 1024 });
+            if (!fs.existsSync(fp) || fs.statSync(fp).size < 200) throw new Error('empty thumb');
+            return fs.readFileSync(fp);
+          })().finally(() => thumbInflight.delete(key));
+          thumbInflight.set(key, p);
+        }
+        const buf = await p;
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Cache-Control': 'public, max-age=86400',
+          'Access-Control-Allow-Origin': '*'
+        });
+        res.end(buf);
+      } catch (e) {
+        console.log('[thumb-preview]', e.message || e);
+        // fallback 1x1 transparent jpeg-ish empty → 204 so client keeps poster
+        res.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
+        res.end();
+      }
+
     // ==================== PROXY: IMAGE ====================
     } else if (pathname === '/api/proxy/image') {
       const targetUrl = parsed.searchParams.get('url');
@@ -2096,7 +2422,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k === '18tube' ? '18Tube' : k === 'viet69' ? 'Viet69' : k === 'pornhub' ? 'Pornhub' : k === 'kkphim' ? 'KKPhim' : k, base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k === '18tube' ? '18Tube' : k === 'viet69' ? 'Viet69' : k === 'pornhub' ? 'Pornhub' : k === 'kkphim' ? 'KKPhim' : k === 'nguonc' ? 'NguonC' : k === 'xchina' ? '3xChina' : k, base: v.base }
         ]))
       });
 

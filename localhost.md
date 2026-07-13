@@ -18,6 +18,8 @@ node server.js
 | Viet69 | viet69.be — list/search/category, HLS qua emb.cd-vs.com |
 | Pornhub | subscriptions (login) — Warp SOCKS5 + `.pornhub_cookies.txt`, HLS phncdn |
 | KKPhim | default `/the-loai/phim-18` — Warp SOCKS5, HLS kkphimplayer (CDN direct) |
+| NguonC | phim.nguonc.com — API list phim-18, m3u8 từ HTML (CDN sing.phimmoi.net có thể DNS fail) |
+| 3xChina | 3xchina.page — Chinese AV, hglink→StreamHG HLS (direct, no Warp) |
 | SexBJCam | Embed iframe |
 | 18Tube | Creator OnlyFans — fetch 43 videos từ API, HLS stream |
 | JavTrailers | Cần Warp (SOCKS5) nếu ISP chặn |

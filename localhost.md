@@ -16,6 +16,8 @@ node server.js
 | VLXX | Cơ bản |
 | QuạtVN | quatvn.mom (thay .lol) |
 | Viet69 | viet69.be — list/search/category, HLS qua emb.cd-vs.com |
+| Pornhub | subscriptions (login) — Warp SOCKS5 + `.pornhub_cookies.txt`, HLS phncdn |
+| KKPhim | default `/the-loai/phim-18` — Warp SOCKS5, HLS kkphimplayer (CDN direct) |
 | SexBJCam | Embed iframe |
 | 18Tube | Creator OnlyFans — fetch 43 videos từ API, HLS stream |
 | JavTrailers | Cần Warp (SOCKS5) nếu ISP chặn |

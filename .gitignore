@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 .hermes/
 .javtiful_cookies.txt
+.pornhub_cookies.txt
 .local/
 favorites.json
 *.mp4

@@ -6,9 +6,34 @@ const { URL } = require('url');
 const crypto = require('crypto');
 const dns = require('dns');
 
-const BLOCKED_HOSTS = ['javtrailers.com', 'javtiful.com'];
+const BLOCKED_HOSTS = ['javtrailers.com', 'javtiful.com', 'pornhub.com', 'kkphim.com'];
 const SOCKS5_PROXY = 'socks5://127.0.0.1:1080';
 const FAVORITES_FILE = path.join(__dirname, 'favorites.json');
+const PORNHUB_COOKIES_FILE = path.join(__dirname, '.pornhub_cookies.txt');
+
+/** Netscape cookies.txt or "a=b; c=d" → Cookie header string */
+function readCookieFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return '';
+    if (!raw.includes('\t') && raw.includes('=')) {
+      // already header-ish (possibly multi-line)
+      return raw.split('\n').map(l => l.trim()).filter(Boolean).join('; ');
+    }
+    const parts = [];
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const cols = t.split('\t');
+      if (cols.length >= 7) parts.push(`${cols[5]}=${cols[6]}`);
+    }
+    return parts.join('; ');
+  } catch { return ''; }
+}
+
+function pornhubCookieHeader() {
+  return readCookieFile(PORNHUB_COOKIES_FILE);
+}
 
 // ============================================================
 // Favorites (server-side, sync across devices)
@@ -118,8 +143,9 @@ function fetchText(url, referer, extraHeaders = {}) {
         const { execSync } = require('child_process');
         const escapedUrl = url.replace(/'/g, "'\\''");
         const cookieOpt = extraHeaders['Cookie'] ? ` -b '${extraHeaders['Cookie'].replace(/'/g, "'\\''")}'` : '';
-        const cmd = `curl -sL --max-time 30 --socks5 '${SOCKS5_PROXY}' -A '${UA.replace(/'/g, "'\\''")}'${cookieOpt} '${escapedUrl}'`;
-        const out = execSync(cmd, { encoding: 'utf8', timeout: 35000 });
+        const refOpt = referer ? ` -e '${referer.replace(/'/g, "'\\''")}'` : '';
+        const cmd = `curl -sL --max-time 45 --socks5 '${SOCKS5_PROXY}' -A '${UA.replace(/'/g, "'\\''")}'${cookieOpt}${refOpt} '${escapedUrl}'`;
+        const out = execSync(cmd, { encoding: 'utf8', timeout: 50000, maxBuffer: 30 * 1024 * 1024 });
         if (out && out.length > 100) return resolve(out);
         reject(new Error('Empty response via proxy'));
       } catch (e) { reject(e); }
@@ -305,11 +331,15 @@ const SITES = {
   javtiful: { base: 'https://javtiful.com' },
   '18tube': { base: 'https://18tube.my' },
   viet69: { base: 'https://viet69.be' },
+  pornhub: { base: 'https://www.pornhub.com' },
+  kkphim: { base: 'https://kkphim.com' },
 };
 
-/** Referer cho proxy stream — CDN viet69 (cd-vs) cần emb.cd-vs.com */
+/** Referer cho proxy stream — CDN viet69 / Pornhub / KKPhim */
 function proxyRefererFor(url, site, host) {
   if (site === 'viet69' || /cd-vs\.com/i.test(url || '')) return 'https://emb.cd-vs.com/';
+  if (site === 'pornhub' || /phncdn\.com/i.test(url || '')) return 'https://www.pornhub.com/';
+  if (site === 'kkphim' || /kkphimplayer|phimapi\.com/i.test(url || '')) return 'https://kkphim.com/';
   return (host || getHost(site || 'javhdz')) + '/';
 }
 
@@ -490,6 +520,27 @@ const server = http.createServer(async (req, res) => {
         } else {
           url = page > 1 ? `${HOST}/page/${page}/` : `${HOST}/`;
         }
+      } else if (site === 'pornhub') {
+        if (search) {
+          url = `${HOST}/video/search?search=${encodeURIComponent(search)}`;
+          if (page > 1) url += `&page=${page}`;
+        } else if (category === 'newest') {
+          url = `${HOST}/video?o=mr` + (page > 1 ? `&page=${page}` : '');
+        } else if (category === 'hot') {
+          url = `${HOST}/video?o=ht` + (page > 1 ? `&page=${page}` : '');
+        } else {
+          // default: subscriptions (needs login cookies)
+          url = page > 1 ? `${HOST}/subscriptions?page=${page}` : `${HOST}/subscriptions`;
+        }
+      } else if (site === 'kkphim') {
+        if (search) {
+          url = `${HOST}/tim-kiem?keyword=${encodeURIComponent(search)}`;
+          if (page > 1) url += `&page=${page}`;
+        } else {
+          const cat = category || 'phim-18';
+          url = `${HOST}/the-loai/${cat}`;
+          if (page > 1) url += `?page=${page}`;
+        }
       } else if (site === 'javtiful') {
         if (parsed.searchParams.get('url')) {
           url = parsed.searchParams.get('url');
@@ -518,13 +569,16 @@ const server = http.createServer(async (req, res) => {
       }
 
       console.log(`[SCRAPE] ${url}`);
-      // JavTiful: pass auth cookies để search/listing hoạt động
+      // Auth cookies
       let fetchHeaders = {};
       if (site === 'javtiful') {
         try {
           const c = fs.readFileSync(path.join(__dirname, '.javtiful_cookies.txt'), 'utf8').trim();
           if (c) fetchHeaders['Cookie'] = c;
         } catch {}
+      } else if (site === 'pornhub') {
+        const c = pornhubCookieHeader();
+        if (c) fetchHeaders['Cookie'] = c;
       }
       const html = await fetchText(url, HOST + '/', fetchHeaders);
       const videos = [];
@@ -701,6 +755,74 @@ const server = http.createServer(async (req, res) => {
           { slug: 'creators/fansly', name: 'Fansly' },
           { slug: 'creators/instagram', name: 'Instagram' }
         ];
+      } else if (site === 'pornhub') {
+        const decode = (t) => (t || '').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+          .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+        const seen = new Set();
+        const re = /<li[^>]*class="[^"]*pcVideoListItem[^"]*"[^>]*data-video-vkey="([^"]+)"[\s\S]*?<\/li>/gi;
+        let m;
+        while ((m = re.exec(html))) {
+          const block = m[0], vk = m[1];
+          if (seen.has(vk)) continue;
+          seen.add(vk);
+          const titleM = block.match(/href="\/view_video\.php\?viewkey=[^"]+"[^>]*title="([^"]+)"/i)
+            || block.match(/title="([^"]+)"[^>]*href="\/view_video\.php\?viewkey=/i)
+            || block.match(/alt="([^"]+)"/i);
+          const thumbM = block.match(/data-mediumthumb="([^"]+)"/i)
+            || block.match(/data-thumb_url="([^"]+)"/i)
+            || block.match(/src="(https:\/\/[^"]+)"/i);
+          const viewsM = block.match(/class="views"[^>]*>[\s\S]*?<var>([^<]*)<\/var>/i)
+            || block.match(/([\d.,]+[KMB]?)\s*views/i);
+          const durM = block.match(/class="duration"[^>]*>([^<]+)/i);
+          videos.push({
+            title: decode(titleM?.[1] || vk),
+            path: `/view_video.php?viewkey=${vk}`,
+            thumbnail: thumbM ? thumbM[1] : '',
+            views: viewsM ? viewsM[1].trim() : (durM ? durM[1].trim() : 'N/A')
+          });
+        }
+        categories = [
+          { slug: 'subscriptions', name: 'Subscriptions' },
+          { slug: 'newest', name: 'Mới' },
+          { slug: 'hot', name: 'Hot' }
+        ];
+      } else if (site === 'kkphim') {
+        const seen = new Set();
+        const re = /<tr>[\s\S]*?<div class="poster-wrap">[\s\S]*?<img src="([^"]+)"[\s\S]*?<a href="((?:https:\/\/kkphim\.com)?\/phim\/[^"]+)" class="info-title">([^<]+)<\/a>[\s\S]*?<\/tr>/gi;
+        let m;
+        while ((m = re.exec(html))) {
+          let p = m[2];
+          try { p = p.startsWith('http') ? new URL(p).pathname : p; } catch {}
+          if (seen.has(p)) continue;
+          seen.add(p);
+          videos.push({
+            title: m[3].replace(/&amp;/g, '&').trim(),
+            path: p,
+            thumbnail: m[1],
+            views: 'N/A'
+          });
+        }
+        // fallback: titles only
+        if (!videos.length) {
+          const re2 = /<a href="((?:https:\/\/kkphim\.com)?\/phim\/[^"]+)" class="info-title">([^<]+)<\/a>/g;
+          while ((m = re2.exec(html))) {
+            let p = m[1];
+            try { p = p.startsWith('http') ? new URL(p).pathname : p; } catch {}
+            if (seen.has(p)) continue;
+            seen.add(p);
+            videos.push({ title: m[2].replace(/&amp;/g, '&').trim(), path: p, thumbnail: '', views: 'N/A' });
+          }
+        }
+        categories = [
+          { slug: 'phim-18', name: 'Phim 18+' },
+          { slug: 'kinh-di', name: 'Kinh Dị' },
+          { slug: 'hanh-dong', name: 'Hành Động' },
+          { slug: 'tinh-cam', name: 'Tình Cảm' },
+          { slug: 'hai-huoc', name: 'Hài Hước' },
+          { slug: 'tam-ly', name: 'Tâm Lý' },
+          { slug: 'co-trang', name: 'Cổ Trang' },
+          { slug: 'vien-tuong', name: 'Viễn Tưởng' },
+        ];
       } else {
         const re = /<a class="movie-item m-block" title="([^"]+)" href="([^"]+)">[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<span class="ribbon-viewed">([^<]+)<\/span>/g;
         let m; while ((m = re.exec(html))) {
@@ -754,6 +876,19 @@ const server = http.createServer(async (req, res) => {
           const pageRe = /\/page\/(\d+)\//g;
           let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
           totalPages = pageNums.length ? Math.max(...pageNums) : 1;
+        }
+      } else if (site === 'pornhub') {
+        const pageRe = /[?&]page=(\d+)/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
+        const hasNext = /page_next|rel="next"|class="[^"]*page_next/i.test(html);
+        totalPages = pageNums.length ? Math.max(...pageNums) : 1;
+        if (hasNext && totalPages <= page) totalPages = page + 1;
+      } else if (site === 'kkphim') {
+        const pageRe = /[?&]page=(\d+)/g;
+        let pm; while ((pm = pageRe.exec(html))) pageNums.push(parseInt(pm[1]));
+        totalPages = pageNums.length ? Math.max(...pageNums) : 1;
+        if (/page-item[^>]*>\s*<a[^>]*rel="next"|aria-label="Next"|»|›/i.test(html) && totalPages <= page) {
+          totalPages = page + 1;
         }
       } else {
         // javhdz, sexbjcam: /page/N/ trong href
@@ -838,13 +973,28 @@ const server = http.createServer(async (req, res) => {
       const cleanPath = videoPath.startsWith('/') ? videoPath : '/' + videoPath;
       const url = HOST + cleanPath;
       console.log(`[DETAIL] ${url}`);
-      const html = await fetchText(url, HOST + '/');
+      let detailHeaders = {};
+      if (site === 'pornhub') {
+        const c = pornhubCookieHeader();
+        if (c) detailHeaders['Cookie'] = c;
+      } else if (site === 'javtiful') {
+        try {
+          const c = fs.readFileSync(path.join(__dirname, '.javtiful_cookies.txt'), 'utf8').trim();
+          if (c) detailHeaders['Cookie'] = c;
+        } catch {}
+      }
+      const html = await fetchText(url, HOST + '/', detailHeaders);
 
       const title = (html.match(/<h1 class="page-title[^"]*"[^>]*>([\s\S]*?)<\/h1>/) ||
                      html.match(/<h1 class="header-title"><a[^>]*>([^<]+)<\/a><\/h1>/) ||
                      html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/) ||
                      html.match(/<meta property="og:title" content="([^"]+)"/) ||
-                     html.match(/<title>([^<]+)<\/title>/))?.[1].replace(/<[^>]+>/g, '').replace(/\s*-\s*Viet69\s*$/i, '').trim() || 'Unknown';
+                     html.match(/<title>([^<]+)<\/title>/))?.[1]
+                       .replace(/<[^>]+>/g, '')
+                       .replace(/\s*-\s*Viet69\s*$/i, '')
+                       .replace(/\s*-\s*Pornhub\.com\s*$/i, '')
+                       .replace(/\s*-\s*KKPhim[\s\S]*$/i, '')
+                       .replace(/&amp;/g, '&').trim() || 'Unknown';
 
       let videoId = (html.match(/id="video"\s+data-id="(\d+)"/) || html.match(/server\((\d+)/))?.[1] || null;
       if (site === 'quatvn' && !videoId) {
@@ -1046,6 +1196,87 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // --- PORNHUB ---
+      if (site === 'pornhub') {
+        const parseMediaDefs = (h) => {
+          const m = h.match(/"mediaDefinitions"\s*:\s*\[/);
+          if (!m) return [];
+          const start = m.index + m[0].length - 1;
+          let depth = 0;
+          for (let i = start; i < Math.min(h.length, start + 80000); i++) {
+            if (h[i] === '[') depth++;
+            else if (h[i] === ']') {
+              depth--;
+              if (depth === 0) {
+                try { return JSON.parse(h.slice(start, i + 1)); } catch { return []; }
+              }
+            }
+          }
+          return [];
+        };
+        const defs = parseMediaDefs(html);
+        const hls = defs.filter(d => d && d.format === 'hls' && d.videoUrl && String(d.videoUrl).includes('.m3u8'));
+        hls.sort((a, b) => (parseInt(b.height || b.quality) || 0) - (parseInt(a.height || a.quality) || 0));
+        const best = hls.find(d => d.defaultQuality) || hls[0];
+        if (best?.videoUrl) {
+          streamUrl = best.videoUrl;
+          proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=pornhub`;
+          console.log(`[Pornhub] HLS ${best.quality || best.height}p: ${streamUrl.slice(0, 80)}`);
+        }
+      }
+
+      // --- KKPHIM ---
+      if (site === 'kkphim') {
+        const parseSrcData = (h) => {
+          const tag = h.match(/<script[^>]*id=["']srcData["'][^>]*>([\s\S]*?)<\/script>/i);
+          if (tag) {
+            try { return JSON.parse(tag[1].trim()); } catch {}
+          }
+          const m = h.match(/\[\s*\{\s*"server_name"/);
+          if (!m) return [];
+          const start = m.index;
+          let depth = 0;
+          for (let i = start; i < Math.min(h.length, start + 200000); i++) {
+            if (h[i] === '[') depth++;
+            else if (h[i] === ']') {
+              depth--;
+              if (depth === 0) {
+                try { return JSON.parse(h.slice(start, i + 1)); } catch { return []; }
+              }
+            }
+          }
+          return [];
+        };
+        const serversJson = parseSrcData(html);
+        const eps = [];
+        for (const srv of serversJson || []) {
+          const sname = srv.server_name || 'Server';
+          for (const ep of srv.server_data || []) {
+            const m3u8 = ep.link_m3u8 || '';
+            if (!m3u8 || !String(m3u8).includes('.m3u8')) continue;
+            eps.push({
+              name: `${sname} · ${ep.name || ep.slug || 'Full'}`,
+              streamUrl: m3u8
+            });
+          }
+        }
+        if (eps.length) {
+          streamUrl = eps[0].streamUrl;
+          proxiedStreamUrl = `/api/proxy/pl.m3u8?url=${encodeURIComponent(streamUrl)}&s=kkphim`;
+          if (eps.length > 1) {
+            quatvnPlaylist = eps.map((ep, idx) => ({
+              index: idx,
+              title: ep.name,
+              streamUrl: ep.streamUrl,
+              proxiedStreamUrl: `/api/proxy/pl.m3u8?url=${encodeURIComponent(ep.streamUrl)}&s=kkphim`,
+              thumbnail: null,
+              videoId: null
+            }));
+          }
+          console.log(`[KKPhim] HLS x${eps.length}: ${streamUrl.slice(0, 80)}`);
+        }
+      }
+
       // --- SEXBJCAM ---
       if (site === 'sexbjcam') {
         const ifm = html.match(/<iframe[^>]*src="([^"]+)"/i);
@@ -1221,6 +1452,10 @@ const server = http.createServer(async (req, res) => {
           servers.push({ id: i + 1, name: name || `Server #${i + 1}` });
         });
         if (!servers.length) servers.push({ id: 1, name: 'Server 1' });
+      } else if (site === 'pornhub') {
+        servers.push({ id: 1, name: 'HLS' });
+      } else if (site === 'kkphim') {
+        servers.push({ id: 1, name: 'HLS' });
       }
 
       // Tự động search sukebei cho javhdz
@@ -1861,7 +2096,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, {
         success: true,
         sites: Object.fromEntries(Object.entries(SITES).map(([k, v]) => [
-          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k === '18tube' ? '18Tube' : k, base: v.base }
+          k, { name: k === 'javhdz' ? 'JavHDz' : k === 'vlxx' ? 'VLXX' : k === 'quatvn' ? 'QuatVN' : k === 'sexbjcam' ? 'SexBJCam' : k === 'javtrailers' ? 'JavTrailers' : k === 'javtiful' ? 'JavTiful' : k === '18tube' ? '18Tube' : k === 'viet69' ? 'Viet69' : k === 'pornhub' ? 'Pornhub' : k === 'kkphim' ? 'KKPhim' : k, base: v.base }
         ]))
       });
 

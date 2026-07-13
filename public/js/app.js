@@ -458,7 +458,7 @@ async function openPlayer(video, optSite) {
   window._lastVideoPath = video.path || '';
   window._lastSite = site;
   if (streamUrl) {
-    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com', viet69:'viet69.be', '18tube':'18tube.my' };
+    const hostMap = { javhdz:'javhdz.ws', vlxx:'vlxx.moi', quatvn:'quatvn.moi', sexbjcam:'sexbjcam.com', javtrailers:'javtrailers.com', javtiful:'javtiful.com', viet69:'viet69.be', pornhub:'www.pornhub.com', kkphim:'kkphim.com', '18tube':'18tube.my' };
     const host = hostMap[site] || 'javhdz.ws';
     // Dùng stream URL gốc (CDN) thay vì proxy — yt-dlp xử lý Cloudflare tốt
     const baseUrl = window.location.origin;
@@ -800,7 +800,7 @@ function downloadCached(encodedUrl) {
   const dlSite = btn ? (btn.dataset.site || currentSite) : currentSite;
 
   // Lấy stream URL gốc + tạo lệnh yt-dlp
-  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : dlSite === 'viet69' ? 'viet69.be' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
+  const cmd = `yt-dlp --downloader ffmpeg --downloader-args "ffmpeg_i:-threads 4" --referer "https://${dlSite === 'javhdz' ? 'javhdz.ws' : dlSite === 'vlxx' ? 'vlxx.moi' : dlSite === 'quatvn' ? 'quatvn.moi' : dlSite === 'viet69' ? 'viet69.be' : dlSite === 'pornhub' ? 'www.pornhub.com' : dlSite === 'kkphim' ? 'kkphim.com' : 'sexbjcam.com'}/" -o "video.mp4" '${url}'`;
   
   // Copy vào clipboard
   if (navigator.clipboard && navigator.clipboard.writeText) {
